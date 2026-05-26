@@ -13,17 +13,14 @@ The allocation of projects to groups was performed randomly, using a reproducibl
 
 | Project    | Students |
 |------------|--------|
+| Projeto 1  | Klarissa Morais, Vinícius Moreira<br>Lucas Oliveira|
 | Projeto 2  | Renan Guilherme Siqueira de Araújo<br>Heitor Brayner Prado|
+| Projeto 3  | Pedro Campelo, Danilo Oliveira<br>João Vitor Nascimento, Thomas Alcântara|
+| Projeto 6  | Pedro Casé, Raquel Carneiro<br>Ryei Moraes, Rômulo Filho, Luca Rodrigues|
 | Projeto 7  | Emanoel Thyago Cordeiro dos Santos<br>Abhner Adriel Cristovao Silva<br>Emmanuel Silva Nascimento<br>Davi Vicente Magnata<br>Igor Fragoso Peixoto Lopes de Melo |
 | Projeto 5  | João Marcelo de Souza Motta<br>Thiago Henrique Tomais de Oliveira<br>Vlademir José Montenegro de Melo |
 | Projeto 4  | Juliana Talita<br>João Marrocos<br>Luana Queiroz<br>Pedro Elias<br>Welton Felix |
 
-The following projects were not assigned.
-
-   * Project 1
-   * Project 3
-   * Project 6
-   * Project 8
    
 ---
 
@@ -170,7 +167,7 @@ as well.
 ### Second Milestone: 
 
    * Review the implementation of the type checker and interpreter
-   * Deadline: 11/05
+   * Deadline: 07/06
 
 ### Third Milestone: 
 
