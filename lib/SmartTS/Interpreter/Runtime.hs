@@ -1,5 +1,6 @@
 module SmartTS.Interpreter.Runtime where
 
+import Control.Monad.State
 import Data.ByteString.Lazy (fromStrict)
 import Data.Char (isDigit, isHexDigit, toLower)
 import Data.Digest.Pure.SHA (sha256, showDigest)
@@ -29,24 +30,24 @@ data Runtime = Runtime
   { rtStorage :: Maybe Expr
   , rtParams :: M.Map Name Expr
   , rtLocals :: M.Map Name Binding
+  , rtMethods :: M.Map Name MethodDecl
   }
   deriving (Eq, Show)
 
--- | Impossible case after type checking and typed storage decode (see module header).
+type EvalM = StateT Runtime (Either String)
+
+-- NOTE: I expect the students should not have to read / update the following
+-- function definitions.
 interpretBug :: String -> a
 interpretBug msg =
   error $ "SmartTS internal error (please report): " ++ msg
 
--- | First 16 hex characters of SHA-256 (UTF-8 bytes of @sourceText@). Used in addresses and call-time checks.
--- Implemented with the pure Haskell @SHA@ package (FIPS 180-2), no FFI.
 sourceHashPrefix16 :: String -> String
 sourceHashPrefix16 sourceText =
   let bs = encodeUtf8 (T.pack sourceText)
       digest = sha256 (fromStrict bs)
    in take 16 (showDigest digest)
 
--- | If @addr@ is @KT1@ + 16 hex digits + @_@ + decimal instance id, return those 16 hex chars (lower-cased).
--- Otherwise 'Nothing' (legacy name-based addresses or malformed ids).
 parseEmbeddedSourceHashPrefix :: Address -> Maybe String
 parseEmbeddedSourceHashPrefix addr = do
   rest <- stripPrefix "KT1" addr
@@ -59,7 +60,6 @@ parseEmbeddedSourceHashPrefix addr = do
           Just (map toLower hexPart)
     _ -> Nothing
 
--- | When the address embeds a source hash, require the loaded file to match. Legacy addresses skip this.
 assertAddressMatchesSource :: Address -> String -> Either String ()
 assertAddressMatchesSource addr sourceText =
   case parseEmbeddedSourceHashPrefix addr of
@@ -77,8 +77,6 @@ assertAddressMatchesSource addr sourceText =
                   ++ actual
                   ++ "...). Restore the original source or originate a new instance."
 
--- | Synthetic address: @KT1@ + first 16 hex chars of SHA-256(UTF-8 source) + @_@ + instance index.
--- Same source always yields the same prefix; the suffix distinguishes multiple deployments in one repo.
 generateAddress :: String -> Int -> Address
 generateAddress sourceText instanceId =
   "KT1" ++ sourceHashPrefix16 sourceText ++ "_" ++ show instanceId

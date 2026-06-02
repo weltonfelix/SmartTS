@@ -60,6 +60,7 @@ data Expr = CInt Int
           | MapAccess Expr Expr
           | MapMemCheck Expr Expr
           | MapRem Expr Expr
+          | Call Name [Expr]         -- A call specifies both the function name and the actual arguments.
   deriving (Eq, Show)
 
 type MethodBody = Stmt

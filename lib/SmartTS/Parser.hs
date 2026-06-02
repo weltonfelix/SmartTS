@@ -147,7 +147,7 @@ parseAtom =
     <|> parseMapRemove
     <|> parseBool
     <|> parseInt
-    <|> parseVar
+    <|> parseVarOrCall
     <|> parens parseExpr
 
 parseStorageExpr :: Parser Expr
@@ -158,8 +158,13 @@ parseStorageExpr = do
 parseInt :: Parser Expr
 parseInt = CInt <$> lexeme L.decimal
 
-parseVar :: Parser Expr
-parseVar = Var <$> parseName
+parseVarOrCall :: Parser Expr
+parseVarOrCall = do
+  name <- parseName
+  maybeArgs <- optional (parens (sepBy parseExpr (symbol ",")))
+  return $ case maybeArgs of
+    Nothing -> Var name
+    Just args -> Call name args
 
 parseBool :: Parser Expr
 parseBool =

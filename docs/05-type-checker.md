@@ -84,11 +84,16 @@ keeps an environment:
 
 ```haskell
 data TcEnv = TcEnv
-  { envStorageType :: Type          -- the contract's full storage record type
-  , envBindings    :: Map Name TcBinding
-  , envReturnType  :: Type          -- the method's declared return type
+  { envStorageType        :: Type               -- the contract's full storage record type
+  , envBindings           :: Map Name TcBinding
+  , envFunctionSignatures :: Map Name Signature -- callable @private methods
+  , envReturnType         :: Type               -- the method's declared return type
   }
 ```
+
+`envFunctionSignatures` is built once per method check from all `@private`
+methods in the contract (`buildSigMap`), so every method — `@originate`,
+`@entrypoint`, or `@private` — can call any private helper.
 
 Each binding records whether the name is a parameter, a mutable local (`var`),
 or an immutable local (`val`):
@@ -97,11 +102,24 @@ or an immutable local (`val`):
 data BindingKind = Param | LocalMutable | LocalImmutable
 ```
 
+### The checking monad
+
+Rather than threading `TcEnv` manually through every function, the type checker
+uses a monad:
+
+```haskell
+type TcM = StateT TcEnv (Either String)
+```
+
+`checkStmt` and `inferExpr` both run in `TcM`. Reading the environment uses
+`gets`; adding a new local uses `modify`. Errors short-circuit via `lift .
+Left`. The entry function `checkMethod` runs a `TcM` action with
+`runStateT` and discards the final environment.
+
 The environment for a method starts with all parameters bound as `Param`. As
 the checker walks the statement sequence, `var` and `val` declarations extend
-the map. The updated environment is threaded through `checkStmt`, so
-declarations in earlier statements are visible to later ones in the same
-sequence.
+the map via `modify`, so declarations in earlier statements are visible to
+later ones in the same sequence.
 
 ---
 
@@ -120,8 +138,9 @@ A `var x` or `val x` declaration in `stmt1` is visible in `stmt2` and beyond.
 
 ### Branches do not export locals
 
-`if` and `while` branches are checked with the **outer** environment, and the
-outer environment is **not** updated from inside a branch:
+`if` and `while` branches are checked inside `withSavedEnv`, which saves the
+current `TcEnv` before entering the branch and restores it afterwards. Any
+`var` or `val` declared inside a branch does not escape:
 
 ```typescript
 if (flag) {
@@ -145,8 +164,11 @@ parameters.
 The core function is:
 
 ```haskell
-inferExpr :: TcEnv -> Expr -> Either String Type
+inferExpr :: Expr -> TcM Type
 ```
+
+It reads the environment with `gets` but never modifies it — only `checkStmt`
+extends the bindings map.
 
 Summary of the rules:
 
@@ -159,6 +181,7 @@ Summary of the rules:
 | `x` (variable) | the type bound to `x` in the environment |
 | `e.f` | the type of field `f` in the record type of `e` |
 | `{ k1: e1, … }` | `{ k1: T1, … }` where each `Ti` is inferred from `ei` |
+| `f(e1, …, en)` | the `returnType` of the signature for `f` (arity and argument types must match) |
 | `!e` | `bool` (requires `e : bool`) |
 | `e1 && e2`, `e1 \|\| e2` | `bool` (requires both operands `bool`) |
 | `+`, `-`, `*`, `/`, `%` | `int` (requires both operands `int`) |
