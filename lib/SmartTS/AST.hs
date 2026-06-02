@@ -55,6 +55,7 @@ data Expr = CInt Int
           | Gte Expr Expr
           | Record [(Name, Expr)]
           | Unit
+          | Call Name [Expr]         -- A call specifies both the function name and the actual arguments.
   deriving (Eq, Show)
 
 type MethodBody = Stmt

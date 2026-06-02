@@ -40,9 +40,10 @@ Every method executes inside a `Runtime` record:
 
 ```haskell
 data Runtime = Runtime
-  { rtStorage :: Maybe Expr        -- current storage value (Nothing in originate until written)
-  , rtParams  :: Map Name Expr     -- parameter bindings (read-only)
-  , rtLocals  :: Map Name Binding  -- local var/val bindings
+  { rtStorage :: Maybe Expr              -- current storage value (Nothing until first write)
+  , rtParams  :: Map Name Expr           -- parameter bindings (read-only)
+  , rtLocals  :: Map Name Binding        -- local var/val bindings
+  , rtMethods :: Map Name MethodDecl     -- callable @private methods
   }
 ```
 
@@ -51,6 +52,11 @@ once initialised. Reading `storage.count` evaluates `StorageExpr` to this
 record, then navigates to the `"count"` field. Writing `storage.count = 13`
 replaces the `"count"` field inside the record and stores the updated record
 back in `rtStorage`.
+
+`rtMethods` is populated from the contract's `@private` methods when a method
+is first invoked (by `execMethod` / `execMethodWithInitialStorage`). It is
+passed unchanged into every inner `Runtime` created for a private-method call,
+so helpers can themselves call other helpers.
 
 ### Bindings
 
@@ -67,13 +73,26 @@ binding is an `interpretBug` — it cannot happen in a well-typed program.
 
 ---
 
+## The Evaluation Monad
+
+Both expression evaluation and statement execution use a shared monad:
+
+```haskell
+type EvalM = StateT Runtime (Either String)
+```
+
+`Runtime` is threaded implicitly through every computation. Reads use `get` or
+`gets`; writes use `modify`. User-visible errors (e.g. division by zero) are
+`lift (Left msg)`; impossible post-type-check cases call `interpretBug`
+(a Haskell `error`).
+
 ## Executing Statements
 
-`execStmt :: Runtime -> Stmt -> Either String (Maybe Expr, Runtime)`
+`execStmt :: Stmt -> EvalM (Maybe Expr)`
 
-The first element of the result is the return value (`Nothing` if execution
-continues normally, `Just v` if a `return` was reached). The updated `Runtime`
-reflects any storage mutations and new local bindings.
+The result is the return value (`Nothing` if execution continues normally,
+`Just v` if a `return` was reached). Storage mutations and new local bindings
+are accumulated in the `EvalM` state.
 
 | Statement | What happens |
 |-----------|-------------|
@@ -87,19 +106,41 @@ reflects any storage mutations and new local bindings.
 
 ### How `return` propagates
 
-Statements return `(Maybe Expr, Runtime)`. A `return e` produces `(Just v,
-rt)`. `SequenceStmt` checks after each step and stops immediately if it sees
-`Just v`:
+`ReturnStmt e` produces `Just v`. `SequenceStmt` checks after each step and
+stops immediately if it sees `Just v`:
 
-```
-execSequence rt (s:ss) = do
-  (ret, rt') <- execStmt rt s
+```haskell
+execSequence [] = return Nothing
+execSequence (s:ss) = do
+  ret <- execStmt s
   case ret of
-    Just v  -> Right (Just v, rt')   -- short-circuit
-    Nothing -> execSequence rt' ss   -- keep going
+    Just v  -> return (Just v)   -- short-circuit
+    Nothing -> execSequence ss   -- keep going; state already updated
 ```
 
 A `while` loop does the same inside its iteration loop.
+
+---
+
+## Private Method Calls
+
+`Call name args` is an expression that invokes a `@private` method. The
+interpreter handles it inside `evalExpr`:
+
+1. Look up `name` in `rtMethods` (a bug if absent — the type checker already
+   verified the call).
+2. Evaluate each argument expression left-to-right inside the current `EvalM`
+   state, so any storage mutations from argument evaluation are visible
+   immediately.
+3. Snapshot the current `Runtime`, replace `rtParams` with the argument
+   bindings, clear `rtLocals`, and run `execStmt` on the callee body inside
+   that inner `Runtime` using `runStateT`.
+4. After the callee returns, copy its final `rtStorage` back into the outer
+   `Runtime` via `modify`. The callee's local bindings are discarded.
+5. Return the callee's return value (`interpretBug` if it did not return).
+
+This mechanism allows private helpers to both compute values and mutate
+storage, with all mutations visible to the caller.
 
 ---
 

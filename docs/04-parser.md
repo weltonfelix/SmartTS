@@ -27,8 +27,9 @@ Here is roughly what happens, step by step:
    folds it into `FieldAccess StorageExpr "count"`.
 5. Back in `makeExprParser`: the remaining input starts with `+`, which
    matches the `Add` operator. It calls `parseTerm` again for the right side.
-6. `parseTerm` → `parseAtomOrStorage` → `parseAtom` → `parseVar` returns
-   `Var "by"`. No `.` follows, so the term is just `Var "by"`.
+6. `parseTerm` → `parseAtomOrStorage` → `parseAtom` → `parseVarOrCall` reads
+   `"by"`, sees no `(` next, and returns `Var "by"`. No `.` follows, so the
+   term is just `Var "by"`.
 7. `makeExprParser` builds `Add (FieldAccess StorageExpr "count") (Var "by")`.
 
 The same logic handles arbitrarily nested expressions like
@@ -201,6 +202,12 @@ operator in the usual sense — it does not take two arbitrary expressions, only
 a name on the right. Handling it in `parseTerm` with a suffix loop keeps the
 operator table clean and ensures `a.b.c` always left-associates without
 special precedence rules.
+
+**Variables and calls share one parser.** `parseVarOrCall` reads an identifier
+and then checks whether a `(` follows. If it does, it parses a comma-separated
+argument list and returns `Call name args`; otherwise it returns `Var name`.
+This means `f(a, b).result` parses correctly as a field access on a call
+result, since `parseTerm` applies its `.` loop after `parseVarOrCall` returns.
 
 ---
 

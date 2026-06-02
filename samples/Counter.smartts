@@ -6,17 +6,15 @@ contract Counter {
 
   @originate
   init(initialCount: int): unit {
-    var start: int = initialCount;
-    val isEnabled: bool = true;
-    storage.count = start;
-    storage.enabled = isEnabled;
+    storage.count = initialCount;
+    storage.enabled = true;
     return ();
   }
 
   @entrypoint
   increment(by: int): int {
     if (storage.enabled) {
-      storage.count = storage.count + by;
+      storage.count = clampedAdd(storage.count, by, 1000);
     } else {
       storage.count = storage.count;
     }
@@ -27,5 +25,14 @@ contract Counter {
   setEnabled(value: bool): unit {
     storage.enabled = value;
     return ();
+  }
+
+  @private
+  clampedAdd(a: int, b: int, limit: int): int {
+    var result: int = a + b;
+    if (result > limit) {
+      result = limit;
+    }
+    return result;
   }
 }
