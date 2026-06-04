@@ -80,6 +80,29 @@ evalExpr (Call name args) = do
   case mRet of
     Nothing -> interpretBug ("method `" ++ name ++ "` did not return a value after type check")
     Just v -> return v
+evalExpr (MapVal m) = return (MapVal m)
+evalExpr MapEmpty = return (MapVal M.empty)
+evalExpr (MapAccess base key) = do
+  baseVal <- evalExpr base
+  keyVal <- evalExpr key
+  case baseVal of
+    MapVal m ->
+        case M.lookup keyVal m of
+          Just v -> return v
+          Nothing -> lift (Left "Runtime Error: Key not found in map.")
+    _ -> interpretBug "map access on non-map after type check"
+evalExpr (MapMemCheck base key) = do
+  baseVal <- evalExpr base
+  keyVal <- evalExpr key
+  case baseVal of
+    MapVal m -> return (CBool (M.member keyVal m))
+    _ -> interpretBug "mem check on non-map after type check"
+evalExpr (MapRem base key) = do
+  baseVal <- evalExpr base
+  keyVal <- evalExpr key
+  case baseVal of
+    MapVal m -> return (MapVal (M.delete keyVal m))
+    _ -> interpretBug "map remove on non-map after type check"
 
 -- ---------------------------------------------------------------------------
 -- Statement execution
@@ -154,11 +177,24 @@ assignLValue (LField lv fld) v = do
   rootExpr <- lift $ resolveRootExpr rt root
   updated <- lift $ setFieldPath rootExpr path v
   assignLValue root updated
+assignLValue (LMapAccess lv key) v = do
+  keyVal <- evalExpr key
+  baseVal <- evalExpr (lValueToExpr lv)
+  case baseVal of
+    MapVal m -> assignLValue lv (MapVal (M.insert keyVal v m))
+    _ -> interpretBug "map assignment on non-map after type check"
+
+lValueToExpr :: LValue -> Expr
+lValueToExpr LStorage = StorageExpr
+lValueToExpr (LVar name) = Var name
+lValueToExpr (LField lv name) = FieldAccess (lValueToExpr lv) name
+lValueToExpr (LMapAccess lv key) = MapAccess (lValueToExpr lv) key
 
 flattenLValue :: LValue -> [Name] -> (LValue, [Name])
 flattenLValue LStorage acc = (LStorage, acc)
 flattenLValue (LVar n) acc = (LVar n, acc)
 flattenLValue (LField parent fld) acc = flattenLValue parent (fld : acc)
+flattenLValue (LMapAccess _ _) _ = error "Map updates must be handled by assignLValue directly, not flattened."
 
 resolveRootExpr :: Runtime -> LValue -> Either String Expr
 resolveRootExpr rt LStorage =

@@ -156,11 +156,13 @@ checkAssignable lv = do
           tcError $ "Cannot assign to immutable val `" ++ n ++ "` (or through it for field updates)."
         Just (TcBinding LocalMutable _) -> return ()
     LField {} -> return ()
+    LMapAccess _ _ -> error "TODO"
 
 rootOf :: LValue -> LValue
 rootOf LStorage = LStorage
 rootOf (LVar n) = LVar n
 rootOf (LField p _) = rootOf p
+rootOf (LMapAccess _ _ ) = error "TODO"
 
 typeOfLValue :: LValue -> TcM Type
 typeOfLValue LStorage = gets envStorageType
@@ -177,6 +179,7 @@ typeOfLValue (LField root fld) = do
         Nothing -> tcError $ "Record has no field `" ++ fld ++ "`."
         Just t -> return t
     _ -> tcError "Field access requires a record value (or typed storage)."
+typeOfLValue (LMapAccess _ _ ) = error "TODO"
 
 inferExpr :: Expr -> TcM Type
 inferExpr (CInt _) = return TInt
@@ -232,6 +235,12 @@ inferExpr (Call name args) = do
         argTypes
         expected
       return (returnType sig)
+inferExpr (MapEmpty) = error "TODO"
+inferExpr (MapAccess _ _) = error "TODO"
+inferExpr (MapMemCheck _ _) = error "TODO"
+inferExpr (MapRem _ _) = error "TODO"
+inferExpr (MapVal _) = error "TODO"
+
 
 inferBoolBin :: Expr -> Expr -> TcM Type
 inferBoolBin a b = do
@@ -300,3 +309,4 @@ prettyType (TRecord fs) =
       , let lastI = length fs - 1
       ]
     ++ "}"
+prettyType (TMap _ _) = error "TODO"

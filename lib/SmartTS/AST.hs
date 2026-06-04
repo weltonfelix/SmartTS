@@ -1,5 +1,7 @@
 module SmartTS.AST where
 
+import qualified Data.Map.Strict as M
+
 data Contract = Contract {
   contractName :: Name,
   contractStorage :: Storage,
@@ -61,7 +63,8 @@ data Expr = CInt Int
           | MapMemCheck Expr Expr
           | MapRem Expr Expr
           | Call Name [Expr]         -- A call specifies both the function name and the actual arguments.
-  deriving (Eq, Show)
+          | MapVal (M.Map Expr Expr)
+  deriving (Eq, Show, Ord)
 
 type MethodBody = Stmt
 
