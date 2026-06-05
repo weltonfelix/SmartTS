@@ -66,23 +66,23 @@ checkMethod c m =
 checkStmt :: TcEnv -> Stmt -> Either String TcEnv
 checkStmt env (SequenceStmt ss) = foldM checkStmt env ss
 checkStmt env (ReturnStmt e) = do
-  t <- inferExpr env e
+  t <- inferExprWithExpected env (Just (envReturnType env)) e
   expectType "return value" t (envReturnType env)
   return env
 checkStmt env (VarDeclStmt n typ e) = do
   noDuplicateLocal n env
-  t <- inferExpr env e
+  t <- inferExprWithExpected env (Just typ) e
   expectType ("initializer of var `" ++ n ++ "`") t typ
   return $ insertLocal n LocalMutable typ env
 checkStmt env (ValDeclStmt n typ e) = do
   noDuplicateLocal n env
-  t <- inferExpr env e
+  t <- inferExprWithExpected env (Just typ) e
   expectType ("initializer of val `" ++ n ++ "`") t typ
   return $ insertLocal n LocalImmutable typ env
 checkStmt env (AssignmentStmt lv e) = do
   checkAssignable env lv
   tl <- typeOfLValue env lv
-  te <- inferExpr env e
+  te <- inferExprWithExpected env (Just tl) e
   expectType "assignment" te tl
   return env
 checkStmt env (IfStmt cond thn mel) = do
@@ -126,11 +126,13 @@ checkAssignable env lv =
           Left $ "Cannot assign to immutable val `" ++ n ++ "` (or through it for field updates)."
         Just (TcBinding LocalMutable _) -> Right ()
     LField {} -> Right ()
+    LMapAccess {} -> Right ()
 
 rootOf :: LValue -> LValue
 rootOf LStorage = LStorage
 rootOf (LVar n) = LVar n
 rootOf (LField p _) = rootOf p
+rootOf (LMapAccess p _) = rootOf p
 
 typeOfLValue :: TcEnv -> LValue -> Either String Type
 typeOfLValue env LStorage = pure (envStorageType env)
@@ -146,11 +148,21 @@ typeOfLValue env (LField root fld) = do
         Nothing -> Left $ "Record has no field `" ++ fld ++ "`."
         Just t -> Right t
     _ -> Left "Field access requires a record value (or typed storage)."
+typeOfLValue env (LMapAccess base key) = do
+  tBase <- typeOfLValue env base
+  case tBase of
+    TMap k v -> do
+      ensureComparableKeyType "map assignment" k
+      tk <- inferExpr env key
+      expectType "map assignment key" tk k
+      Right v
+    _ -> Left "Map index assignment requires a map-typed left-hand side."
 
 inferExpr :: TcEnv -> Expr -> Either String Type
 inferExpr _ (CInt _) = Right TInt
 inferExpr _ (CBool _) = Right TBool
 inferExpr _ Unit = Right TUnit
+inferExpr _ MapEmpty = Left "Cannot infer type of empty_map without a contextual map type."
 inferExpr env StorageExpr = pure (envStorageType env)
 inferExpr env (Var n) =
   case M.lookup n (envBindings env) of
@@ -184,6 +196,59 @@ inferExpr env (Gte a b) = inferIntCmp env a b
 inferExpr env (Record pairs) = do
   ts <- mapM (\(k, e) -> (,) k <$> inferExpr env e) pairs
   Right (TRecord [(k, t) | (k, t) <- ts])
+inferExpr env (MapAccess mapExpr keyExpr) = do
+  tm <- inferExpr env mapExpr
+  case tm of
+    TMap k v -> do
+      ensureComparableKeyType "map access" k
+      tk <- inferExpr env keyExpr
+      expectType "map access key" tk k
+      Right v
+    _ -> Left "Map access requires a map-typed expression."
+inferExpr env (MapMemCheck mapExpr keyExpr) = do
+  tm <- inferExpr env mapExpr
+  case tm of
+    TMap k _ -> do
+      ensureComparableKeyType "mem(map, key)" k
+      tk <- inferExpr env keyExpr
+      expectType "mem(map, key) key" tk k
+      Right TBool
+    _ -> Left "mem(map, key) requires the first argument to be a map."
+inferExpr env (MapRem mapExpr keyExpr) = do
+  tm <- inferExpr env mapExpr
+  case tm of
+    TMap k v -> do
+      ensureComparableKeyType "remove(map, key)" k
+      tk <- inferExpr env keyExpr
+      expectType "remove(map, key) key" tk k
+      Right (TMap k v)
+    _ -> Left "remove(map, key) requires the first argument to be a map."
+
+inferExprWithExpected :: TcEnv -> Maybe Type -> Expr -> Either String Type
+inferExprWithExpected env expected expr =
+  case expr of
+    MapEmpty -> inferMapEmpty expected
+    _ -> inferExpr env expr
+
+inferMapEmpty :: Maybe Type -> Either String Type
+inferMapEmpty Nothing = Left "Cannot infer type of empty_map without a contextual map type."
+inferMapEmpty (Just t) =
+  case t of
+    TMap k v -> do
+      ensureComparableKeyType "empty_map" k
+      Right (TMap k v)
+    _ -> Left "empty_map requires an expected map type (map<K, V>)."
+
+isComparable :: Type -> Bool
+isComparable TInt = True
+isComparable TBool = True
+isComparable _ = False
+
+ensureComparableKeyType :: String -> Type -> Either String ()
+ensureComparableKeyType ctx t =
+  if isComparable t
+    then Right ()
+    else Left $ ctx ++ " requires a comparable map key type (int or bool), got " ++ prettyType t ++ "."
 
 inferBoolBin :: TcEnv -> Expr -> Expr -> Either String Type
 inferBoolBin env a b = do
@@ -235,6 +300,7 @@ typesEqual :: Type -> Type -> Bool
 typesEqual TInt TInt = True
 typesEqual TBool TBool = True
 typesEqual TUnit TUnit = True
+typesEqual (TMap k1 v1) (TMap k2 v2) = typesEqual k1 k2 && typesEqual v1 v2
 typesEqual (TRecord as) (TRecord bs) = length as == length bs && and (zipWith fieldEq as bs)
   where
     fieldEq (n1, t1) (n2, t2) = n1 == n2 && typesEqual t1 t2
@@ -244,6 +310,7 @@ prettyType :: Type -> String
 prettyType TInt = "int"
 prettyType TBool = "bool"
 prettyType TUnit = "unit"
+prettyType (TMap k v) = "map<" ++ prettyType k ++ ", " ++ prettyType v ++ ">"
 prettyType (TRecord fs) =
   "{"
     ++ concat
