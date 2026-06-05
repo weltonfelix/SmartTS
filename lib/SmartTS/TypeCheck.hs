@@ -4,10 +4,16 @@ module SmartTS.TypeCheck
   ( typeCheckContract
   ) where
 
-import Control.Monad (foldM, void)
+import Control.Monad (when, zipWithM_)
+import Control.Monad.State
 import Data.List (nub)
 import qualified Data.Map.Strict as M
 import SmartTS.AST
+
+data Signature = Signature
+  { formalArgs :: [Type]
+  , returnType :: Type
+  } deriving (Eq, Show)
 
 data BindingKind = Param | LocalMutable | LocalImmutable
   deriving (Eq, Show)
@@ -18,13 +24,26 @@ data TcBinding = TcBinding
   }
   deriving (Eq, Show)
 
--- | Environment for checking one method body.
 data TcEnv = TcEnv
   { envStorageType :: Type
   , envBindings :: M.Map Name TcBinding
+  , envFunctionSignatures :: M.Map Name Signature
   , envReturnType :: Type
   }
   deriving (Eq, Show)
+
+type TcM = StateT TcEnv (Either String)
+
+tcError :: String -> TcM a
+tcError = lift . Left
+
+-- | Run an action in a child scope: state changes (new locals) do not escape.
+withSavedEnv :: TcM a -> TcM a
+withSavedEnv action = do
+  saved <- get
+  r <- action
+  put saved
+  return r
 
 typeCheckContract :: Contract -> Either String ()
 typeCheckContract c = do
@@ -46,6 +65,17 @@ checkDuplicateParams params =
         then Right ()
         else Left "Duplicate parameter name in method."
 
+buildSigMap :: Contract -> M.Map Name Signature
+buildSigMap c =
+  M.fromList
+    [ (methodName m, Signature
+        { formalArgs = [t | FormalParameter _ t <- methodArgs m]
+        , returnType = methodReturnType m
+        })
+    | m <- contractMethods c
+    , methodKind m == Private
+    ]
+
 checkMethod :: Contract -> MethodDecl -> Either String ()
 checkMethod c m =
   let storageT = TRecord (contractStorage c)
@@ -58,75 +88,76 @@ checkMethod c m =
         TcEnv
           { envStorageType = storageT
           , envBindings = paramMap
+          , envFunctionSignatures = buildSigMap c
           , envReturnType = methodReturnType m
           }
-   in void (checkStmt env0 (methodBody m))
+   in case runStateT (checkStmt (methodBody m)) env0 of
+        Left err -> Left err
+        Right _ -> Right ()
 
--- | Check a statement; returns updated environment (bindings from @var@/@val@).
-checkStmt :: TcEnv -> Stmt -> Either String TcEnv
-checkStmt env (SequenceStmt ss) = foldM checkStmt env ss
-checkStmt env (ReturnStmt e) = do
-  t <- inferExprWithExpected env (Just (envReturnType env)) e
-  expectType "return value" t (envReturnType env)
-  return env
-checkStmt env (VarDeclStmt n typ e) = do
-  noDuplicateLocal n env
-  t <- inferExprWithExpected env (Just typ) e
-  expectType ("initializer of var `" ++ n ++ "`") t typ
-  return $ insertLocal n LocalMutable typ env
-checkStmt env (ValDeclStmt n typ e) = do
-  noDuplicateLocal n env
-  t <- inferExprWithExpected env (Just typ) e
-  expectType ("initializer of val `" ++ n ++ "`") t typ
-  return $ insertLocal n LocalImmutable typ env
-checkStmt env (AssignmentStmt lv e) = do
-  checkAssignable env lv
-  tl <- typeOfLValue env lv
-  te <- inferExprWithExpected env (Just tl) e
-  expectType "assignment" te tl
-  return env
-checkStmt env (IfStmt cond thn mel) = do
-  tc <- inferExpr env cond
-  expectType "if condition" tc TBool
-  void (checkStmt env thn)
+-- | Check a statement; new locals are accumulated in the State.
+checkStmt :: Stmt -> TcM ()
+checkStmt (SequenceStmt ss) = mapM_ checkStmt ss
+checkStmt (ReturnStmt e) = do
+  expected <- gets envReturnType
+  t <- inferExprWithExpected (Just expected) e
+  lift $ expectType "return value" t expected
+checkStmt (VarDeclStmt n typ e) = do
+  noDuplicateLocal n
+  t <- inferExprWithExpected (Just typ) e
+  lift $ expectType ("initializer of var `" ++ n ++ "`") t typ
+  modify $ insertLocal n LocalMutable typ
+checkStmt (ValDeclStmt n typ e) = do
+  noDuplicateLocal n
+  t <- inferExprWithExpected (Just typ) e
+  lift $ expectType ("initializer of val `" ++ n ++ "`") t typ
+  modify $ insertLocal n LocalImmutable typ
+checkStmt (AssignmentStmt lv e) = do
+  checkAssignable lv
+  tl <- typeOfLValue lv
+  te <- inferExprWithExpected (Just tl) e
+  lift $ expectType "assignment" te tl
+checkStmt (IfStmt cond thn mel) = do
+  tc <- inferExpr cond
+  lift $ expectType "if condition" tc TBool
+  withSavedEnv (checkStmt thn)
   case mel of
     Nothing -> return ()
-    Just els -> void (checkStmt env els)
-  return env
-checkStmt env (WhileStmt cond body) = do
-  tc <- inferExpr env cond
-  expectType "while condition" tc TBool
-  void (checkStmt env body)
-  return env
+    Just els -> withSavedEnv (checkStmt els)
+checkStmt (WhileStmt cond body) = do
+  tc <- inferExpr cond
+  lift $ expectType "while condition" tc TBool
+  withSavedEnv (checkStmt body)
 
-noDuplicateLocal :: Name -> TcEnv -> Either String ()
-noDuplicateLocal n env =
+noDuplicateLocal :: Name -> TcM ()
+noDuplicateLocal n = do
+  env <- get
   case M.lookup n (envBindings env) of
     Just (TcBinding LocalMutable _) ->
-      Left $ "Duplicate local `" ++ n ++ "` in the same block."
+      tcError $ "Duplicate local `" ++ n ++ "` in the same block."
     Just (TcBinding LocalImmutable _) ->
-      Left $ "Duplicate local `" ++ n ++ "` in the same block."
-    _ -> Right ()
+      tcError $ "Duplicate local `" ++ n ++ "` in the same block."
+    _ -> return ()
 
 insertLocal :: Name -> BindingKind -> Type -> TcEnv -> TcEnv
 insertLocal n k t env =
   env {envBindings = M.insert n (TcBinding k t) (envBindings env)}
 
--- | @storage@ is always assignable; locals must be mutable. Parameters and @val@ are not.
-checkAssignable :: TcEnv -> LValue -> Either String ()
-checkAssignable env lv =
+checkAssignable :: LValue -> TcM ()
+checkAssignable lv = do
+  env <- get
   case rootOf lv of
-    LStorage -> Right ()
+    LStorage -> return ()
     LVar n ->
       case M.lookup n (envBindings env) of
-        Nothing -> Left $ "Unknown assignment target: `" ++ n ++ "`."
+        Nothing -> tcError $ "Unknown assignment target: `" ++ n ++ "`."
         Just (TcBinding Param _) ->
-          Left $ "Cannot assign to method parameter `" ++ n ++ "` (or through it for field updates)."
+          tcError $ "Cannot assign to method parameter `" ++ n ++ "` (or through it for field updates)."
         Just (TcBinding LocalImmutable _) ->
-          Left $ "Cannot assign to immutable val `" ++ n ++ "` (or through it for field updates)."
-        Just (TcBinding LocalMutable _) -> Right ()
-    LField {} -> Right ()
-    LMapAccess {} -> Right ()
+          tcError $ "Cannot assign to immutable val `" ++ n ++ "` (or through it for field updates)."
+        Just (TcBinding LocalMutable _) -> return ()
+    LField {} -> return ()
+    LMapAccess {} -> return ()
 
 rootOf :: LValue -> LValue
 rootOf LStorage = LStorage
@@ -134,101 +165,34 @@ rootOf (LVar n) = LVar n
 rootOf (LField p _) = rootOf p
 rootOf (LMapAccess p _) = rootOf p
 
-typeOfLValue :: TcEnv -> LValue -> Either String Type
-typeOfLValue env LStorage = pure (envStorageType env)
-typeOfLValue env (LVar n) =
+typeOfLValue :: LValue -> TcM Type
+typeOfLValue LStorage = gets envStorageType
+typeOfLValue (LVar n) = do
+  env <- get
   case M.lookup n (envBindings env) of
-    Nothing -> Left $ "Unknown variable `" ++ n ++ "`."
-    Just b -> Right (bindingType b)
-typeOfLValue env (LField root fld) = do
-  tRoot <- typeOfLValue env root
+    Nothing -> tcError $ "Unknown variable `" ++ n ++ "`."
+    Just b -> return (bindingType b)
+typeOfLValue (LField root fld) = do
+  tRoot <- typeOfLValue root
   case tRoot of
     TRecord fields ->
       case lookup fld fields of
-        Nothing -> Left $ "Record has no field `" ++ fld ++ "`."
-        Just t -> Right t
-    _ -> Left "Field access requires a record value (or typed storage)."
-typeOfLValue env (LMapAccess base key) = do
-  tBase <- typeOfLValue env base
+        Nothing -> tcError $ "Record has no field `" ++ fld ++ "`."
+        Just t -> return t
+    _ -> tcError "Field access requires a record value (or typed storage)."
+typeOfLValue (LMapAccess base key) = do
+  tBase <- typeOfLValue base
   case tBase of
     TMap k v -> do
-      ensureComparableKeyType "map assignment" k
-      tk <- inferExpr env key
-      expectType "map assignment key" tk k
-      Right v
-    _ -> Left "Map index assignment requires a map-typed left-hand side."
+      lift $ ensureComparableKeyType "map assignment" k
+      tk <- inferExpr key
+      lift $ expectType "map assignment key" tk k
+      return v
+    _ -> tcError "Map index assignment requires a map-typed left-hand side."
 
-inferExpr :: TcEnv -> Expr -> Either String Type
-inferExpr _ (CInt _) = Right TInt
-inferExpr _ (CBool _) = Right TBool
-inferExpr _ Unit = Right TUnit
-inferExpr _ MapEmpty = Left "Cannot infer type of empty_map without a contextual map type."
-inferExpr env StorageExpr = pure (envStorageType env)
-inferExpr env (Var n) =
-  case M.lookup n (envBindings env) of
-    Nothing -> Left $ "Unknown variable `" ++ n ++ "`."
-    Just b -> Right (bindingType b)
-inferExpr env (FieldAccess e fld) = do
-  t <- inferExpr env e
-  case t of
-    TRecord fields ->
-      case lookup fld fields of
-        Nothing -> Left $ "Record has no field `" ++ fld ++ "`."
-        Just ft -> Right ft
-    _ -> Left "Field access requires a record-typed expression."
-inferExpr env (Not e) = do
-  t <- inferExpr env e
-  expectType "operand of !" t TBool
-  return TBool
-inferExpr env (And a b) = inferBoolBin env a b
-inferExpr env (Or a b) = inferBoolBin env a b
-inferExpr env (Add a b) = inferIntBin env a b
-inferExpr env (Sub a b) = inferIntBin env a b
-inferExpr env (Mul a b) = inferIntBin env a b
-inferExpr env (Div a b) = inferIntBin env a b
-inferExpr env (Mod a b) = inferIntBin env a b
-inferExpr env (Eq a b) = inferEq env a b
-inferExpr env (Neq a b) = inferEq env a b
-inferExpr env (Lt a b) = inferIntCmp env a b
-inferExpr env (Lte a b) = inferIntCmp env a b
-inferExpr env (Gt a b) = inferIntCmp env a b
-inferExpr env (Gte a b) = inferIntCmp env a b
-inferExpr env (Record pairs) = do
-  ts <- mapM (\(k, e) -> (,) k <$> inferExpr env e) pairs
-  Right (TRecord [(k, t) | (k, t) <- ts])
-inferExpr env (MapAccess mapExpr keyExpr) = do
-  tm <- inferExpr env mapExpr
-  case tm of
-    TMap k v -> do
-      ensureComparableKeyType "map access" k
-      tk <- inferExpr env keyExpr
-      expectType "map access key" tk k
-      Right v
-    _ -> Left "Map access requires a map-typed expression."
-inferExpr env (MapMemCheck mapExpr keyExpr) = do
-  tm <- inferExpr env mapExpr
-  case tm of
-    TMap k _ -> do
-      ensureComparableKeyType "mem(map, key)" k
-      tk <- inferExpr env keyExpr
-      expectType "mem(map, key) key" tk k
-      Right TBool
-    _ -> Left "mem(map, key) requires the first argument to be a map."
-inferExpr env (MapRem mapExpr keyExpr) = do
-  tm <- inferExpr env mapExpr
-  case tm of
-    TMap k v -> do
-      ensureComparableKeyType "remove(map, key)" k
-      tk <- inferExpr env keyExpr
-      expectType "remove(map, key) key" tk k
-      Right (TMap k v)
-    _ -> Left "remove(map, key) requires the first argument to be a map."
-
-inferExprWithExpected :: TcEnv -> Maybe Type -> Expr -> Either String Type
-inferExprWithExpected env expected expr =
-  case expr of
-    MapEmpty -> inferMapEmpty expected
-    _ -> inferExpr env expr
+inferExprWithExpected :: Maybe Type -> Expr -> TcM Type
+inferExprWithExpected expected MapEmpty = lift $ inferMapEmpty expected
+inferExprWithExpected _ expr = inferExpr expr
 
 inferMapEmpty :: Maybe Type -> Either String Type
 inferMapEmpty Nothing = Left "Cannot infer type of empty_map without a contextual map type."
@@ -250,38 +214,124 @@ ensureComparableKeyType ctx t =
     then Right ()
     else Left $ ctx ++ " requires a comparable map key type (int or bool), got " ++ prettyType t ++ "."
 
-inferBoolBin :: TcEnv -> Expr -> Expr -> Either String Type
-inferBoolBin env a b = do
-  ta <- inferExpr env a
-  tb <- inferExpr env b
-  expectType "left operand of boolean operator" ta TBool
-  expectType "right operand of boolean operator" tb TBool
+inferExpr :: Expr -> TcM Type
+inferExpr (CInt _) = return TInt
+inferExpr (CBool _) = return TBool
+inferExpr Unit = return TUnit
+inferExpr MapEmpty = tcError "Cannot infer type of empty_map without a contextual map type."
+inferExpr StorageExpr = gets envStorageType
+inferExpr (Var n) = do
+  env <- get
+  case M.lookup n (envBindings env) of
+    Nothing -> tcError $ "Unknown variable `" ++ n ++ "`."
+    Just b -> return (bindingType b)
+inferExpr (FieldAccess e fld) = do
+  t <- inferExpr e
+  case t of
+    TRecord fields ->
+      case lookup fld fields of
+        Nothing -> tcError $ "Record has no field `" ++ fld ++ "`."
+        Just ft -> return ft
+    _ -> tcError "Field access requires a record-typed expression."
+inferExpr (Not e) = do
+  t <- inferExpr e
+  lift $ expectType "operand of !" t TBool
+  return TBool
+inferExpr (And a b) = inferBoolBin a b
+inferExpr (Or a b) = inferBoolBin a b
+inferExpr (Add a b) = inferIntBin a b
+inferExpr (Sub a b) = inferIntBin a b
+inferExpr (Mul a b) = inferIntBin a b
+inferExpr (Div a b) = inferIntBin a b
+inferExpr (Mod a b) = inferIntBin a b
+inferExpr (Eq a b) = inferEq a b
+inferExpr (Neq a b) = inferEq a b
+inferExpr (Lt a b) = inferIntCmp a b
+inferExpr (Lte a b) = inferIntCmp a b
+inferExpr (Gt a b) = inferIntCmp a b
+inferExpr (Gte a b) = inferIntCmp a b
+inferExpr (Record pairs) = do
+  ts <- mapM (\(k, e) -> (,) k <$> inferExpr e) pairs
+  return $ TRecord [(k, t) | (k, t) <- ts]
+inferExpr (Call name args) = do
+  env <- get
+  case M.lookup name (envFunctionSignatures env) of
+    Nothing -> tcError $ "Unknown function `" ++ name ++ "`."
+    Just sig -> do
+      let expected = formalArgs sig
+      when (length args /= length expected) $
+        tcError $
+          "Function `" ++ name ++ "` expects " ++ show (length expected)
+            ++ " argument(s) but got " ++ show (length args) ++ "."
+      argTypes <- mapM inferExpr args
+      zipWithM_
+        (\t ex -> lift $ expectType ("argument to `" ++ name ++ "`") t ex)
+        argTypes
+        expected
+      return (returnType sig)
+inferExpr (MapAccess mapExpr keyExpr) = do
+  tm <- inferExpr mapExpr
+  case tm of
+    TMap k v -> do
+      lift $ ensureComparableKeyType "map access" k
+      tk <- inferExpr keyExpr
+      lift $ expectType "map access key" tk k
+      return v
+    _ -> tcError "Map access requires a map-typed expression."
+inferExpr (MapMemCheck mapExpr keyExpr) = do
+  tm <- inferExpr mapExpr
+  case tm of
+    TMap k _ -> do
+      lift $ ensureComparableKeyType "mem(map, key)" k
+      tk <- inferExpr keyExpr
+      lift $ expectType "mem(map, key) key" tk k
+      return TBool
+    _ -> tcError "mem(map, key) requires the first argument to be a map."
+inferExpr (MapRem mapExpr keyExpr) = do
+  tm <- inferExpr mapExpr
+  case tm of
+    TMap k v -> do
+      lift $ ensureComparableKeyType "remove(map, key)" k
+      tk <- inferExpr keyExpr
+      lift $ expectType "remove(map, key) key" tk k
+      return (TMap k v)
+    _ -> tcError "remove(map, key) requires the first argument to be a map."
+inferExpr (MapVal _) =
+  tcError "MapVal is a runtime value and cannot appear in source expressions."
+
+
+inferBoolBin :: Expr -> Expr -> TcM Type
+inferBoolBin a b = do
+  ta <- inferExpr a
+  tb <- inferExpr b
+  lift $ expectType "left operand of boolean operator" ta TBool
+  lift $ expectType "right operand of boolean operator" tb TBool
   return TBool
 
-inferIntBin :: TcEnv -> Expr -> Expr -> Either String Type
-inferIntBin env a b = do
-  ta <- inferExpr env a
-  tb <- inferExpr env b
-  expectType "left operand of arithmetic operator" ta TInt
-  expectType "right operand of arithmetic operator" tb TInt
+inferIntBin :: Expr -> Expr -> TcM Type
+inferIntBin a b = do
+  ta <- inferExpr a
+  tb <- inferExpr b
+  lift $ expectType "left operand of arithmetic operator" ta TInt
+  lift $ expectType "right operand of arithmetic operator" tb TInt
   return TInt
 
-inferIntCmp :: TcEnv -> Expr -> Expr -> Either String Type
-inferIntCmp env a b = do
-  ta <- inferExpr env a
-  tb <- inferExpr env b
-  expectType "left operand of comparison" ta TInt
-  expectType "right operand of comparison" tb TInt
+inferIntCmp :: Expr -> Expr -> TcM Type
+inferIntCmp a b = do
+  ta <- inferExpr a
+  tb <- inferExpr b
+  lift $ expectType "left operand of comparison" ta TInt
+  lift $ expectType "right operand of comparison" tb TInt
   return TBool
 
-inferEq :: TcEnv -> Expr -> Expr -> Either String Type
-inferEq env a b = do
-  ta <- inferExpr env a
-  tb <- inferExpr env b
+inferEq :: Expr -> Expr -> TcM Type
+inferEq a b = do
+  ta <- inferExpr a
+  tb <- inferExpr b
   if typesEqual ta tb
-    then Right TBool
+    then return TBool
     else
-      Left $
+      tcError $
         "Equality requires operands of the same type (got "
           ++ prettyType ta
           ++ " and "

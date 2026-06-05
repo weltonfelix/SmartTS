@@ -69,7 +69,7 @@ a body.
 |-----------|---------|
 | `@originate` | Called once to deploy the contract and initialise storage. |
 | `@entrypoint` | Can be called by the CLI after deployment. |
-| `@private` | Internal helper; cannot be called from outside. |
+| `@private` | Internal helper; can be called from any other method within the same contract, but not from the CLI. |
 
 A contract must have **exactly one** `@originate` method. It may have any
 number of `@entrypoint` and `@private` methods.
@@ -243,6 +243,25 @@ All binary operators at the same level are **left-associative**:
 
 Use parentheses to override precedence: `(a + b) * c`.
 
+### Private method calls
+
+A `@private` method is called like a function expression. The call evaluates
+to the method's return value, and any storage mutations made inside the callee
+propagate back to the caller:
+
+```typescript
+storage.count = clampedAdd(storage.count, by, 1000);
+```
+
+The argument list matches the method's formal parameter list in order. Calling
+an unknown method, passing the wrong number of arguments, or passing an
+argument of the wrong type is a type error caught at check time.
+
+Only `@private` methods can be called this way. `@entrypoint` and `@originate`
+methods are not callable from within the contract.
+
+---
+
 ### Field access
 
 Use `.` to read a field from a record or from storage:
@@ -299,17 +318,15 @@ contract Counter {
 
   @originate
   init(initialCount: int): unit {
-    var start: int = initialCount;
-    val isEnabled: bool = true;
-    storage.count = start;
-    storage.enabled = isEnabled;
+    storage.count = initialCount;
+    storage.enabled = true;
     return ();
   }
 
   @entrypoint
   increment(by: int): int {
     if (storage.enabled) {
-      storage.count = storage.count + by;
+      storage.count = clampedAdd(storage.count, by, 1000);
     } else {
       storage.count = storage.count;
     }
@@ -321,13 +338,23 @@ contract Counter {
     storage.enabled = value;
     return ();
   }
+
+  @private
+  clampedAdd(a: int, b: int, limit: int): int {
+    var result: int = a + b;
+    if (result > limit) {
+      result = limit;
+    }
+    return result;
+  }
 }
 ```
 
 Notice:
-- `init` uses both `var` and `val` to initialise storage.
-- `increment` reads `storage.enabled` in an `if` condition and mutates
-  `storage.count`.
+- `init` writes both storage fields directly and returns `()`.
+- `increment` delegates the arithmetic to the private helper `clampedAdd`,
+  which caps the result at 1000. Storage mutations inside `clampedAdd`
+  propagate back to `increment`.
 - `setEnabled` takes a `bool` parameter and writes it directly to storage.
 - All methods that return `unit` end with `return ();`.
 

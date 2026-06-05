@@ -104,6 +104,7 @@ data Expr
   | Var Name               -- variable reference
   | FieldAccess Expr Name  -- e.f
   | Record [(Name, Expr)]  -- { f1: e1, f2: e2, … }
+  | Call Name [Expr]       -- f(e1, e2, …) — private method call
   | Not  Expr              -- !e
   | And  Expr Expr         -- e1 && e2
   | Or   Expr Expr         -- e1 || e2
@@ -128,6 +129,10 @@ A few things to note:
 - `Record` carries the fields in **source order**, which the type checker
   preserves. `{ a: 1, b: 2 }` and `{ b: 2, a: 1 }` produce different `Expr`
   values and different inferred types.
+- `Call` carries the callee name and the actual argument list. Only `@private`
+  methods appear here; `@entrypoint` and `@originate` methods are not callable
+  as expressions. The result of a `Call` is the callee's return value; any
+  storage mutations inside the callee propagate back to the caller.
 
 ---
 
