@@ -4,7 +4,7 @@ module Main (main) where
 
 import Test.Tasty
 import Test.Tasty.HUnit
-import SmartTS.AST
+import SmartTS.IR.AST
 import SmartTS.Parser
 import Data.Aeson (object, (.=))
 import SmartTS.Interpreter (ContractInstance (..), contractInstanceFromStorageValue)
@@ -30,15 +30,15 @@ tests =
     ]
 
 -- Helper function to parse and assert success
-parseSuccess :: String -> (Contract -> Assertion) -> Assertion
+parseSuccess :: String -> (ParsedContract -> Assertion) -> Assertion
 parseSuccess input assertion = case parseContractFromString input of
-  Left err -> assertFailure $ "Parse failed: " ++ show err
+  Left err      -> assertFailure $ "Parse failed: " ++ show err
   Right contract -> assertion contract
 
 -- Helper function to parse and assert failure
 parseFailure :: String -> Assertion
 parseFailure input = case parseContractFromString input of
-  Left _ -> return ()  -- Expected failure
+  Left _  -> return ()  -- Expected failure
   Right _ -> assertFailure "Expected parse failure but got success"
 
 typeCheckSuccess :: String -> Assertion
@@ -47,32 +47,32 @@ typeCheckSuccess input = case parseContractFromString input of
   Right c ->
     case typeCheckContract c of
       Left err -> assertFailure $ "Type check failed: " ++ err
-      Right () -> return ()
+      Right _  -> return ()
 
 typeCheckFailure :: String -> Assertion
 typeCheckFailure input = case parseContractFromString input of
   Left err -> assertFailure $ "Parse failed (need valid parse for type test): " ++ show err
   Right c ->
     case typeCheckContract c of
-      Left _ -> return ()
-      Right () -> assertFailure "Expected type error but checking succeeded"
+      Left _  -> return ()
+      Right _ -> assertFailure "Expected type error but checking succeeded"
 
 contractTests :: TestTree
 contractTests = testGroup "Contract Parsing"
   [ testCase "Simple contract with storage and method" $
       parseSuccess "contract MyContract { storage: { x: int }; @originate init(): int { return 0; } }" $ \contract ->
         case contract of
-          Contract "MyContract" [( "x", TInt)] [MethodDecl Originate "init" [] TInt (SequenceStmt [ReturnStmt (CInt 0)])] ->
+          Contract "MyContract" [( "x", TInt)] [MethodDecl Originate "init" [] TInt (SequenceStmt [ReturnStmt (CInt _ 0)])] ->
             return ()
           _ -> assertFailure $ "Unexpected contract structure: " ++ show contract
-  
+
   , testCase "Contract with multiple storage fields" $
       parseSuccess "contract Test { storage: { x: int, y: int }; @entrypoint test(): int { return 1; } }" $ \contract ->
         case contract of
           Contract "Test" storage _ ->
             assertEqual "Storage should have 2 fields" 2 (length storage)
           _ -> assertFailure "Unexpected contract name"
-  
+
   , testCase "Contract with multiple methods" $
       parseSuccess "contract Test { storage: { x: int }; @originate init(): int { return 0; } @entrypoint inc(): int { return 1; } }" $ \contract ->
         case contract of
@@ -89,13 +89,13 @@ storageTests = testGroup "Storage Parsing"
             assertEqual "Storage field name" "x" name
             assertEqual "Storage field type" TInt typ
           _ -> assertFailure "Unexpected storage structure"
-  
+
   , testCase "Multiple storage fields" $
       parseSuccess "contract Test { storage: { x: int, y: int, z: int }; @originate init(): int { return 0; } }" $ \contract ->
         case contract of
           Contract _ storage _ ->
             assertEqual "Should have 3 storage fields" 3 (length storage)
-  
+
   , testCase "Storage with single field (no comma)" $
       parseSuccess "contract Test { storage: { x: int }; @originate init(): int { return 0; } }" $ \contract ->
         case contract of
@@ -111,21 +111,21 @@ methodTests = testGroup "Method Parsing"
           Contract _ _ [MethodDecl Originate "init" [] TInt _] ->
             return ()
           _ -> assertFailure "Expected @originate method"
-  
+
   , testCase "Method with @entrypoint decorator" $
       parseSuccess "contract Test { storage: { x: int }; @entrypoint test(): int { return 0; } }" $ \contract ->
         case contract of
           Contract _ _ [MethodDecl EntryPoint "test" [] TInt _] ->
             return ()
           _ -> assertFailure "Expected @entrypoint method"
-  
+
   , testCase "Method with @private decorator" $
       parseSuccess "contract Test { storage: { x: int }; @private helper(): int { return 0; } }" $ \contract ->
         case contract of
           Contract _ _ [MethodDecl Private "helper" [] TInt _] ->
             return ()
           _ -> assertFailure "Expected @private method"
-  
+
   , testCase "Method with parameters" $
       parseSuccess "contract Test { storage: { x: int }; @entrypoint add(a: int, b: int): int { return a + b; } }" $ \contract ->
         case contract of
@@ -136,14 +136,14 @@ methodTests = testGroup "Method Parsing"
                 return ()
               _ -> assertFailure "Unexpected parameter structure"
           _ -> assertFailure "Unexpected method structure"
-  
+
   , testCase "Method with single parameter" $
       parseSuccess "contract Test { storage: { x: int }; @entrypoint inc(x: int): int { return x + 1; } }" $ \contract ->
         case contract of
           Contract _ _ [MethodDecl _ _ params _ _] ->
             assertEqual "Should have 1 parameter" 1 (length params)
           _ -> assertFailure "Unexpected method structure"
-  
+
   , testCase "Method with empty parameter list" $
       parseSuccess "contract Test { storage: { x: int }; @originate init(): int { return 0; } }" $ \contract ->
         case contract of
@@ -157,99 +157,99 @@ expressionTests = testGroup "Expression Parsing"
   [ testCase "Integer literal" $
       parseSuccess "contract Test { storage: { x: int }; @originate init(): int { return 42; } }" $ \contract ->
         case contract of
-          Contract _ _ [MethodDecl _ _ _ _ (SequenceStmt [ReturnStmt (CInt 42)])] ->
+          Contract _ _ [MethodDecl _ _ _ _ (SequenceStmt [ReturnStmt (CInt _ 42)])] ->
             return ()
           _ -> assertFailure $ "Expected integer literal 42, got: " ++ show contract
-  
+
   , testCase "Variable reference" $
       parseSuccess "contract Test { storage: { x: int }; @entrypoint test(): int { return x; } }" $ \contract ->
         case contract of
-          Contract _ _ [MethodDecl _ _ _ _ (SequenceStmt [ReturnStmt (Var "x")])] ->
+          Contract _ _ [MethodDecl _ _ _ _ (SequenceStmt [ReturnStmt (Var _ "x")])] ->
             return ()
           _ -> assertFailure $ "Expected variable reference, got: " ++ show contract
-  
+
   , testCase "Addition expression" $
       parseSuccess "contract Test { storage: { x: int }; @entrypoint test(): int { return 1 + 2; } }" $ \contract ->
         case contract of
-          Contract _ _ [MethodDecl _ _ _ _ (SequenceStmt [ReturnStmt (Add (CInt 1) (CInt 2))])] ->
+          Contract _ _ [MethodDecl _ _ _ _ (SequenceStmt [ReturnStmt (Add _ (CInt _ 1) (CInt _ 2))])] ->
             return ()
           _ -> assertFailure $ "Expected addition expression, got: " ++ show contract
-  
+
   , testCase "Subtraction expression" $
       parseSuccess "contract Test { storage: { x: int }; @entrypoint test(): int { return 5 - 3; } }" $ \contract ->
         case contract of
-          Contract _ _ [MethodDecl _ _ _ _ (SequenceStmt [ReturnStmt (Sub (CInt 5) (CInt 3))])] ->
+          Contract _ _ [MethodDecl _ _ _ _ (SequenceStmt [ReturnStmt (Sub _ (CInt _ 5) (CInt _ 3))])] ->
             return ()
           _ -> assertFailure $ "Expected subtraction expression, got: " ++ show contract
-  
+
   , testCase "Chained addition" $
       parseSuccess "contract Test { storage: { x: int }; @entrypoint test(): int { return 1 + 2 + 3; } }" $ \contract ->
         case contract of
           Contract _ _ [MethodDecl _ _ _ _ (SequenceStmt [ReturnStmt expr])] -> do
             -- Should parse as (1 + 2) + 3 due to left associativity
             case expr of
-              Add (Add (CInt 1) (CInt 2)) (CInt 3) ->
+              Add _ (Add _ (CInt _ 1) (CInt _ 2)) (CInt _ 3) ->
                 return ()
               _ -> assertFailure $ "Expected left-associative addition, got: " ++ show expr
           _ -> assertFailure $ "Unexpected expression structure: " ++ show contract
-  
+
   , testCase "Mixed addition and subtraction" $
       parseSuccess "contract Test { storage: { x: int }; @entrypoint test(): int { return 10 - 2 + 3; } }" $ \contract ->
         case contract of
           Contract _ _ [MethodDecl _ _ _ _ (SequenceStmt [ReturnStmt expr])] -> do
             -- Should parse as (10 - 2) + 3 due to left associativity
             case expr of
-              Add (Sub (CInt 10) (CInt 2)) (CInt 3) ->
+              Add _ (Sub _ (CInt _ 10) (CInt _ 2)) (CInt _ 3) ->
                 return ()
               _ -> assertFailure $ "Expected left-associative mixed operations, got: " ++ show expr
           _ -> assertFailure $ "Unexpected expression structure: " ++ show contract
-  
+
   , testCase "Parenthesized expression" $
       parseSuccess "contract Test { storage: { x: int }; @entrypoint test(): int { return (1 + 2); } }" $ \contract ->
         case contract of
-          Contract _ _ [MethodDecl _ _ _ _ (SequenceStmt [ReturnStmt (Add (CInt 1) (CInt 2))])] ->
+          Contract _ _ [MethodDecl _ _ _ _ (SequenceStmt [ReturnStmt (Add _ (CInt _ 1) (CInt _ 2))])] ->
             return ()
           _ -> assertFailure $ "Expected parenthesized addition, got: " ++ show contract
-  
+
   , testCase "Unit expression" $
       parseSuccess "contract Test { storage: { x: int }; @entrypoint test(): int { return (); } }" $ \contract ->
         case contract of
-          Contract _ _ [MethodDecl _ _ _ _ (SequenceStmt [ReturnStmt Unit])] ->
+          Contract _ _ [MethodDecl _ _ _ _ (SequenceStmt [ReturnStmt (Unit _)])] ->
             return ()
           _ -> assertFailure $ "Expected unit expression, got: " ++ show contract
 
   , testCase "Boolean expression (&&) and boolean type" $
       parseSuccess "contract Test { storage: { x: int }; @entrypoint check(): bool { return true && false; } }" $ \contract ->
         case contract of
-          Contract _ _ [MethodDecl _ "check" [] TBool (SequenceStmt [ReturnStmt (And (CBool True) (CBool False))])] ->
+          Contract _ _ [MethodDecl _ "check" [] TBool (SequenceStmt [ReturnStmt (And _ (CBool _ True) (CBool _ False))])] ->
             return ()
           _ -> assertFailure $ "Expected boolean && expression, got: " ++ show contract
 
   , testCase "Not expression" $
       parseSuccess "contract Test { storage: { x: int }; @entrypoint notit(): bool { return !false; } }" $ \contract ->
         case contract of
-          Contract _ _ [MethodDecl _ "notit" [] TBool (SequenceStmt [ReturnStmt (Not (CBool False))])] ->
+          Contract _ _ [MethodDecl _ "notit" [] TBool (SequenceStmt [ReturnStmt (Not _ (CBool _ False))])] ->
             return ()
           _ -> assertFailure $ "Expected !false, got: " ++ show contract
 
   , testCase "Relational expression (==)" $
       parseSuccess "contract Test { storage: { x: int }; @entrypoint eq(): bool { return 1 == 2; } }" $ \contract ->
         case contract of
-          Contract _ _ [MethodDecl _ "eq" [] TBool (SequenceStmt [ReturnStmt (Eq (CInt 1) (CInt 2))])] ->
+          Contract _ _ [MethodDecl _ "eq" [] TBool (SequenceStmt [ReturnStmt (Eq _ (CInt _ 1) (CInt _ 2))])] ->
             return ()
           _ -> assertFailure $ "Expected 1 == 2, got: " ++ show contract
 
   , testCase "Mul/Div/Mod expressions" $
       parseSuccess "contract Test { storage: { x: int }; @entrypoint arith(): int { return 6 * 7; } }" $ \contract ->
         case contract of
-          Contract _ _ [MethodDecl _ "arith" [] TInt (SequenceStmt [ReturnStmt (Mul (CInt 6) (CInt 7))])] ->
+          Contract _ _ [MethodDecl _ "arith" [] TInt (SequenceStmt [ReturnStmt (Mul _ (CInt _ 6) (CInt _ 7))])] ->
             return ()
           _ -> assertFailure $ "Expected 6 * 7, got: " ++ show contract
 
   , testCase "Record type and record literal" $
       parseSuccess "contract Test { storage: { x: int }; @entrypoint get(): { a: int, b: bool } { return { a: 1, b: true }; } }" $ \contract ->
         case contract of
-          Contract _ _ [MethodDecl _ "get" [] (TRecord [("a", TInt), ("b", TBool)]) (SequenceStmt [ReturnStmt (Record [("a", CInt 1), ("b", CBool True)])])] ->
+          Contract _ _ [MethodDecl _ "get" [] (TRecord [("a", TInt), ("b", TBool)]) (SequenceStmt [ReturnStmt (Record _ [("a", CInt _ 1), ("b", CBool _ True)])])] ->
             return ()
           _ -> assertFailure $ "Expected record type/literal, got: " ++ show contract
 
@@ -258,7 +258,7 @@ expressionTests = testGroup "Expression Parsing"
         case contract of
           Contract _ _
             [ MethodDecl _ "proj" [] TInt
-                (SequenceStmt [ReturnStmt (FieldAccess (Var "x") "a")])
+                (SequenceStmt [ReturnStmt (FieldAccess _ (Var _ "x") "a")])
             ] ->
               return ()
           _ -> assertFailure $ "Expected projection x.a, got: " ++ show contract
@@ -269,7 +269,7 @@ expressionTests = testGroup "Expression Parsing"
           Contract _ _
             [ MethodDecl _ "proj2" [] TInt
                 (SequenceStmt
-                  [ReturnStmt (FieldAccess (FieldAccess (Var "x") "a") "b")])]
+                  [ReturnStmt (FieldAccess _ (FieldAccess _ (Var _ "x") "a") "b")])]
             -> return ()
           _ -> assertFailure $ "Expected chained projection x.a.b, got: " ++ show contract
 
@@ -280,9 +280,9 @@ expressionTests = testGroup "Expression Parsing"
             [ MethodDecl _ "litproj2" [] TInt
                 (SequenceStmt
                   [ReturnStmt
-                    (FieldAccess
-                      (FieldAccess
-                        (Record [("a", Record [("b", CInt 1)])])
+                    (FieldAccess _
+                      (FieldAccess _
+                        (Record _ [("a", Record _ [("b", CInt _ 1)])])
                         "a")
                       "b")])]
             -> return ()
@@ -293,7 +293,7 @@ expressionTests = testGroup "Expression Parsing"
         case contract of
           Contract _ _
             [ MethodDecl _ "litproj" [] TInt
-                (SequenceStmt [ReturnStmt (FieldAccess (Record [("a", CInt 1), ("b", CBool True)]) "a")])
+                (SequenceStmt [ReturnStmt (FieldAccess _ (Record _ [("a", CInt _ 1), ("b", CBool _ True)]) "a")])
             ] ->
               return ()
           _ -> assertFailure $ "Expected projection on record literal, got: " ++ show contract
@@ -304,42 +304,42 @@ statementTests = testGroup "Statement Parsing"
   [ testCase "Return statement" $
       parseSuccess "contract Test { storage: { x: int }; @entrypoint test(): int { return 42; } }" $ \contract ->
         case contract of
-          Contract _ _ [MethodDecl _ _ _ _ (SequenceStmt [ReturnStmt (CInt 42)])] ->
+          Contract _ _ [MethodDecl _ _ _ _ (SequenceStmt [ReturnStmt (CInt _ 42)])] ->
             return ()
           _ -> assertFailure $ "Expected return statement, got: " ++ show contract
-  
+
   , testCase "Assignment statement" $
       parseSuccess "contract Test { storage: { x: int }; @entrypoint test(): int { x = 10; return x; } }" $ \contract ->
         case contract of
-          Contract _ _ [MethodDecl _ _ _ _ (SequenceStmt [AssignmentStmt (LVar "x") (CInt 10), ReturnStmt (Var "x")])] ->
+          Contract _ _ [MethodDecl _ _ _ _ (SequenceStmt [AssignmentStmt (LVar "x") (CInt _ 10), ReturnStmt (Var _ "x")])] ->
             return ()
           _ -> assertFailure "Expected assignment and return statements"
-  
+
   , testCase "Multiple statements in block" $
       parseSuccess "contract Test { storage: { x: int }; @entrypoint test(): int { x = 1; x = 2; return x; } }" $ \contract ->
         case contract of
           Contract _ _ [MethodDecl _ _ _ _ (SequenceStmt stmts)] ->
             assertEqual "Should have 3 statements" 3 (length stmts)
           _ -> assertFailure "Unexpected statement structure"
-  
+
   , testCase "Assignment with expression" $
       parseSuccess "contract Test { storage: { x: int }; @entrypoint test(): int { x = 1 + 2; return x; } }" $ \contract ->
         case contract of
-          Contract _ _ [MethodDecl _ _ _ _ (SequenceStmt [AssignmentStmt (LVar "x") (Add (CInt 1) (CInt 2)), ReturnStmt (Var "x")])] ->
+          Contract _ _ [MethodDecl _ _ _ _ (SequenceStmt [AssignmentStmt (LVar "x") (Add _ (CInt _ 1) (CInt _ 2)), ReturnStmt (Var _ "x")])] ->
             return ()
           _ -> assertFailure "Expected assignment with expression"
 
   , testCase "If statement with else" $
       parseSuccess "contract Test { storage: { x: int }; @entrypoint f(): int { if (true) { return 1; } else { return 2; } } }" $ \contract ->
         case contract of
-          Contract _ _ [MethodDecl _ "f" [] TInt (SequenceStmt [IfStmt (CBool True) (SequenceStmt [ReturnStmt (CInt 1)]) (Just (SequenceStmt [ReturnStmt (CInt 2)]))])] ->
+          Contract _ _ [MethodDecl _ "f" [] TInt (SequenceStmt [IfStmt (CBool _ True) (SequenceStmt [ReturnStmt (CInt _ 1)]) (Just (SequenceStmt [ReturnStmt (CInt _ 2)]))])] ->
             return ()
           _ -> assertFailure $ "Expected if/else, got: " ++ show contract
 
   , testCase "While statement" $
       parseSuccess "contract Test { storage: { x: int }; @entrypoint loop(): int { while (false) { x = 1; } return x; } }" $ \contract ->
         case contract of
-          Contract _ _ [MethodDecl _ "loop" [] TInt (SequenceStmt [WhileStmt (CBool False) (SequenceStmt [AssignmentStmt (LVar "x") (CInt 1)]) , ReturnStmt (Var "x")])] ->
+          Contract _ _ [MethodDecl _ "loop" [] TInt (SequenceStmt [WhileStmt (CBool _ False) (SequenceStmt [AssignmentStmt (LVar "x") (CInt _ 1)]) , ReturnStmt (Var _ "x")])] ->
             return ()
           _ -> assertFailure $ "Expected while statement, got: " ++ show contract
 
@@ -349,8 +349,8 @@ statementTests = testGroup "Statement Parsing"
           Contract _ _
             [MethodDecl _ "fa" [] TInt
               (SequenceStmt
-                [ AssignmentStmt (LField (LVar "x") "a") (CInt 3)
-                , ReturnStmt (FieldAccess (Var "x") "a")
+                [ AssignmentStmt (LField (LVar "x") "a") (CInt _ 3)
+                , ReturnStmt (FieldAccess _ (Var _ "x") "a")
                 ])] ->
               return ()
           _ -> assertFailure $ "Expected x.a assignment, got: " ++ show contract
@@ -363,9 +363,9 @@ statementTests = testGroup "Statement Parsing"
               (SequenceStmt
                 [ AssignmentStmt
                     (LField (LField (LVar "x") "a") "b")
-                    (CInt 3)
+                    (CInt _ 3)
                 , ReturnStmt
-                    (FieldAccess (FieldAccess (Var "x") "a") "b")
+                    (FieldAccess _ (FieldAccess _ (Var _ "x") "a") "b")
                 ])] ->
               return ()
           _ -> assertFailure $ "Expected x.a.b assignment, got: " ++ show contract
@@ -376,7 +376,7 @@ statementTests = testGroup "Statement Parsing"
           Contract _ _
             [ MethodDecl _ "sr" [] TInt
                 (SequenceStmt
-                  [ReturnStmt (FieldAccess StorageExpr "x")])
+                  [ReturnStmt (FieldAccess _ (StorageExpr _) "x")])
             ] ->
               return ()
           _ -> assertFailure $ "Expected storage read, got: " ++ show contract
@@ -387,8 +387,8 @@ statementTests = testGroup "Statement Parsing"
           Contract _ _
             [ MethodDecl _ "sw" [] TInt
                 (SequenceStmt
-                  [ AssignmentStmt (LField LStorage "x") (CInt 10)
-                  , ReturnStmt (FieldAccess StorageExpr "x")
+                  [ AssignmentStmt (LField LStorage "x") (CInt _ 10)
+                  , ReturnStmt (FieldAccess _ (StorageExpr _) "x")
                   ])
             ] ->
               return ()
@@ -400,9 +400,9 @@ statementTests = testGroup "Statement Parsing"
           Contract _ _
             [ MethodDecl _ "v" [] TInt
                 (SequenceStmt
-                  [ VarDeclStmt "y" TInt (CInt 10)
-                  , AssignmentStmt (LVar "y") (CInt 11)
-                  , ReturnStmt (Var "y")
+                  [ VarDeclStmt "y" TInt (CInt _ 10)
+                  , AssignmentStmt (LVar "y") (CInt _ 11)
+                  , ReturnStmt (Var _ "y")
                   ])
             ] ->
               return ()
@@ -414,8 +414,8 @@ statementTests = testGroup "Statement Parsing"
           Contract _ _
             [ MethodDecl _ "c" [] TInt
                 (SequenceStmt
-                  [ ValDeclStmt "y" TInt (CInt 10)
-                  , ReturnStmt (Var "y")
+                  [ ValDeclStmt "y" TInt (CInt _ 10)
+                  , ReturnStmt (Var _ "y")
                   ])
             ] ->
               return ()
@@ -427,9 +427,9 @@ statementTests = testGroup "Statement Parsing"
           Contract _ _
             [ MethodDecl _ "fa2" [] TInt
                 (SequenceStmt
-                  [ VarDeclStmt "t" (TRecord [("a", TInt)]) (Var "x")
-                  , AssignmentStmt (LField (LVar "t") "a") (CInt 7)
-                  , ReturnStmt (FieldAccess (Var "t") "a")
+                  [ VarDeclStmt "t" (TRecord [("a", TInt)]) (Var _ "x")
+                  , AssignmentStmt (LField (LVar "t") "a") (CInt _ 7)
+                  , ReturnStmt (FieldAccess _ (Var _ "t") "a")
                   ])
             ] ->
               return ()
@@ -471,7 +471,7 @@ typeCheckTests =
             case contractInstanceFromStorageValue c (object ["n" .= (1 :: Int), "b" .= True]) of
               Left err -> assertFailure err
               Right (ContractInstance _ st) -> case st of
-                Record [("n", CInt 1), ("b", CBool True)] -> return ()
+                Record _ [("n", CInt _ 1), ("b", CBool _ True)] -> return ()
                 _ -> assertFailure $ "unexpected storage expr: " ++ show st
     ]
 
@@ -479,26 +479,26 @@ errorTests :: TestTree
 errorTests = testGroup "Error Cases"
   [ testCase "Missing contract keyword" $
       parseFailure "MyContract { storage: { x: int }; @originate init(): int { return 0; } }"
-  
+
   , testCase "Missing storage declaration" $
       parseFailure "contract Test { @originate init(): int { return 0; } }"
-  
+
   , testCase "Invalid storage syntax" $
       parseFailure "contract Test { storage x: int; @originate init(): int { return 0; } }"
-  
+
   , testCase "Missing method decorator (defaults to Private)" $
       parseSuccess "contract Test { storage: { x: int }; init(): int { return 0; } }" $ \contract ->
         case contract of
           Contract _ _ [MethodDecl Private "init" [] TInt _] ->
             return ()
           _ -> assertFailure "Expected method without decorator to default to Private"
-  
+
   , testCase "Missing return type" $
       parseFailure "contract Test { storage: { x: int }; @entrypoint test() { return 0; } }"
-  
+
   , testCase "Missing semicolon after statement" $
       parseFailure "contract Test { storage: { x: int }; @entrypoint test(): int { return 0 } }"
-  
+
   , testCase "Invalid expression syntax" $
       parseFailure "contract Test { storage: { x: int }; @entrypoint test(): int { return +; } }"
   ]

@@ -5,49 +5,49 @@ import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.Map.Strict as M
 import Data.Scientific (floatingOrInteger)
-import SmartTS.AST
+import SmartTS.IR.AST
 import SmartTS.Interpreter.Runtime
 
-exprToJson :: Expr -> Value
-exprToJson (CInt n) = Number (fromIntegral n)
-exprToJson (CBool b) = Bool b
-exprToJson (Record fields) =
+exprToJson :: Expr a -> Value
+exprToJson (CInt _ n) = Number (fromIntegral n)
+exprToJson (CBool _ b) = Bool b
+exprToJson (Record _ fields) =
   Object $
     KM.fromList
       [ (fromStringKey k, exprToJson v)
       | (k, v) <- fields
       ]
-exprToJson Unit = Null
+exprToJson (Unit _) = Null
 exprToJson _ = Null
 
-jsonToExprByType :: Type -> Value -> Either String Expr
+jsonToExprByType :: Type -> Value -> Either String TypedExpr
 jsonToExprByType TInt (Number n) =
   case floatingOrInteger n :: Either Double Int of
-    Right i -> Right (CInt i)
-    Left _ -> Left "Expected integer number for int type."
-jsonToExprByType TBool (Bool b) = Right (CBool b)
+    Right i -> Right (CInt TInt i)
+    Left _  -> Left "Expected integer number for int type."
+jsonToExprByType TBool (Bool b) = Right (CBool TBool b)
 jsonToExprByType (TRecord fieldsT) (Object obj) = do
-  fields <- mapM (decodeField obj) fieldsT
-  Right (Record fields)
+  pairs <- mapM (decodeField obj) fieldsT
+  Right (Record (TRecord fieldsT) pairs)
   where
     decodeField o (fname, ftype) =
       case KM.lookup (fromStringKey fname) o of
         Nothing -> Left $ "Missing record field in JSON args: " ++ fname
-        Just v -> do
+        Just v  -> do
           ev <- jsonToExprByType ftype v
           Right (fname, ev)
 jsonToExprByType _ _ = Left "JSON value does not match the expected SmartTS type."
 
-jsonToExprUntyped :: Value -> Either String Expr
+jsonToExprUntyped :: Value -> Either String ParsedExpr
 jsonToExprUntyped (Number n) =
   case floatingOrInteger n :: Either Double Int of
-    Right i -> Right (CInt i)
-    Left _ -> Left "Only integer numbers are currently supported."
-jsonToExprUntyped (Bool b) = Right (CBool b)
-jsonToExprUntyped Null = Right Unit
+    Right i -> Right (CInt () i)
+    Left _  -> Left "Only integer numbers are currently supported."
+jsonToExprUntyped (Bool b) = Right (CBool () b)
+jsonToExprUntyped Null = Right (Unit ())
 jsonToExprUntyped (Object obj) = do
   fields <- mapM decodeKV (KM.toList obj)
-  Right (Record fields)
+  Right (Record () fields)
   where
     decodeKV (k, v) = do
       ev <- jsonToExprUntyped v
@@ -55,12 +55,12 @@ jsonToExprUntyped (Object obj) = do
 jsonToExprUntyped _ = Left "Unsupported JSON value for SmartTS expression."
 
 -- | Decode persisted @storage@ JSON using the contract\'s declared storage record type.
-contractInstanceFromStorageValue :: Contract -> Value -> Either String ContractInstance
+contractInstanceFromStorageValue :: Contract a -> Value -> Either String ContractInstance
 contractInstanceFromStorageValue c v = do
   st <- jsonToExprByType (TRecord (contractStorage c)) v
   Right (ContractInstance (contractName c) st)
 
-bindArgsByName :: [FormalParameter] -> Value -> Either String (M.Map Name Expr)
+bindArgsByName :: [FormalParameter] -> Value -> Either String (M.Map Name TypedExpr)
 bindArgsByName params (Object obj) = do
   pairs <- mapM decodeParam params
   Right (M.fromList pairs)
@@ -68,7 +68,7 @@ bindArgsByName params (Object obj) = do
     decodeParam (FormalParameter pname ptype) =
       case KM.lookup (fromStringKey pname) obj of
         Nothing -> Left $ "Missing argument in JSON object: " ++ pname
-        Just v -> do
+        Just v  -> do
           e <- jsonToExprByType ptype v
           Right (pname, e)
 bindArgsByName _ _ = Left "--args must be a JSON object."

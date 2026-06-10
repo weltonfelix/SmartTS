@@ -1,6 +1,6 @@
 module SmartTS.Parser where
 
-import SmartTS.AST
+import SmartTS.IR.AST
 import Text.Megaparsec
 import Text.Megaparsec.Char
 import qualified Text.Megaparsec.Char.Lexer as L
@@ -79,42 +79,42 @@ parseName :: Parser Name
 parseName = identifier
 
 -- Expressions
-parseExpr :: Parser Expr
+parseExpr :: Parser ParsedExpr
 parseExpr = makeExprParser parseTerm operators
 
-operators :: [[Operator Parser Expr]]
+operators :: [[Operator Parser ParsedExpr]]
 operators =
-  [ [ Prefix (Not <$ symbol "!") ]
-  , [ InfixL (Mul <$ symbol "*")
-    , InfixL (Div <$ symbol "/")
-    , InfixL (Mod <$ symbol "%")
+  [ [ Prefix (Not () <$ symbol "!") ]
+  , [ InfixL (Mul () <$ symbol "*")
+    , InfixL (Div () <$ symbol "/")
+    , InfixL (Mod () <$ symbol "%")
     ]
-  , [ InfixL (Add <$ symbol "+")
-    , InfixL (Sub <$ symbol "-")
+  , [ InfixL (Add () <$ symbol "+")
+    , InfixL (Sub () <$ symbol "-")
     ]
-  , [ InfixN (Eq <$ symbol "==")
-    , InfixN (Neq <$ symbol "!=")
-    , InfixN (Lte <$ symbol "<=")
-    , InfixN (Gte <$ symbol ">=")
-    , InfixN (Lt <$ symbol "<")
-    , InfixN (Gt <$ symbol ">")
+  , [ InfixN (Eq () <$ symbol "==")
+    , InfixN (Neq () <$ symbol "!=")
+    , InfixN (Lte () <$ symbol "<=")
+    , InfixN (Gte () <$ symbol ">=")
+    , InfixN (Lt () <$ symbol "<")
+    , InfixN (Gt () <$ symbol ">")
     ]
-  , [ InfixL (And <$ symbol "&&") ]
-  , [ InfixL (Or <$ symbol "||") ]
+  , [ InfixL (And () <$ symbol "&&") ]
+  , [ InfixL (Or () <$ symbol "||") ]
   ]
 
-parseTerm :: Parser Expr
+parseTerm :: Parser ParsedExpr
 parseTerm = do
   base <- parseAtomOrStorage
   fields <- many (symbol "." *> parseName)
-  return (foldl FieldAccess base fields)
+  return (foldl (\e f -> FieldAccess () e f) base fields)
 
-parseAtomOrStorage :: Parser Expr
+parseAtomOrStorage :: Parser ParsedExpr
 parseAtomOrStorage =
   parseStorageExpr
     <|> parseAtom
 
-parseAtom :: Parser Expr
+parseAtom :: Parser ParsedExpr
 parseAtom =
   parseUnit
     <|> parseRecordExpr
@@ -123,43 +123,43 @@ parseAtom =
     <|> parseVarOrCall
     <|> parens parseExpr
 
-parseStorageExpr :: Parser Expr
+parseStorageExpr :: Parser ParsedExpr
 parseStorageExpr = do
   _ <- reserved "storage"
-  return StorageExpr
+  return (StorageExpr ())
 
-parseInt :: Parser Expr
-parseInt = CInt <$> lexeme L.decimal
+parseInt :: Parser ParsedExpr
+parseInt = CInt () <$> lexeme L.decimal
 
-parseVarOrCall :: Parser Expr
+parseVarOrCall :: Parser ParsedExpr
 parseVarOrCall = do
   name <- parseName
   maybeArgs <- optional (parens (sepBy parseExpr (symbol ",")))
   return $ case maybeArgs of
-    Nothing -> Var name
-    Just args -> Call name args
+    Nothing -> Var () name
+    Just args -> Call () name args
 
-parseBool :: Parser Expr
+parseBool :: Parser ParsedExpr
 parseBool =
-  (reserved "true" >> return (CBool True))
-    <|> (reserved "false" >> return (CBool False))
+  (reserved "true" >> return (CBool () True))
+    <|> (reserved "false" >> return (CBool () False))
 
-parseRecordExpr :: Parser Expr
+parseRecordExpr :: Parser ParsedExpr
 parseRecordExpr = do
   fields <- braces $ sepBy parseRecordField (symbol ",")
-  return $ Record fields
+  return $ Record () fields
 
-parseRecordField :: Parser (Name, Expr)
+parseRecordField :: Parser (Name, ParsedExpr)
 parseRecordField = do
   name <- parseName
   _ <- symbol ":"
   expr <- parseExpr
   return (name, expr)
 
-parseUnit :: Parser Expr
+parseUnit :: Parser ParsedExpr
 parseUnit = do
   _ <- symbol "()"
-  return Unit
+  return (Unit ())
 
 parens :: Parser a -> Parser a
 parens = between (symbol "(") (symbol ")")
@@ -168,7 +168,7 @@ braces :: Parser a -> Parser a
 braces = between (symbol "{") (symbol "}")
 
 -- Statements
-parseStmt :: Parser Stmt
+parseStmt :: Parser ParsedStmt
 parseStmt =
   parseIfStmt
     <|> parseWhileStmt
@@ -178,7 +178,7 @@ parseStmt =
     <|> parseAssignment
     <|> parseBlock
 
-parseVarDeclStmt :: Parser Stmt
+parseVarDeclStmt :: Parser ParsedStmt
 parseVarDeclStmt = do
   _ <- reserved "var"
   name <- parseName
@@ -189,7 +189,7 @@ parseVarDeclStmt = do
   _ <- symbol ";"
   return $ VarDeclStmt name typ expr
 
-parseValDeclStmt :: Parser Stmt
+parseValDeclStmt :: Parser ParsedStmt
 parseValDeclStmt = do
   _ <- reserved "val"
   name <- parseName
@@ -200,7 +200,7 @@ parseValDeclStmt = do
   _ <- symbol ";"
   return $ ValDeclStmt name typ expr
 
-parseIfStmt :: Parser Stmt
+parseIfStmt :: Parser ParsedStmt
 parseIfStmt = do
   _ <- reserved "if"
   cond <- parens parseExpr
@@ -210,14 +210,14 @@ parseIfStmt = do
     parseStmt
   return $ IfStmt cond thenBranch elseBranch
 
-parseWhileStmt :: Parser Stmt
+parseWhileStmt :: Parser ParsedStmt
 parseWhileStmt = do
   _ <- reserved "while"
   cond <- parens parseExpr
   body <- parseStmt
   return $ WhileStmt cond body
 
-parseAssignment :: Parser Stmt
+parseAssignment :: Parser ParsedStmt
 parseAssignment = do
   target <- parseLValue
   _ <- symbol "="
@@ -235,14 +235,14 @@ parseAssignableBase :: Parser LValue
 parseAssignableBase =
   (reserved "storage" >> return LStorage) <|> (LVar <$> parseName)
 
-parseReturn :: Parser Stmt
+parseReturn :: Parser ParsedStmt
 parseReturn = do
   _ <- reserved "return"
   expr <- parseExpr
   _ <- symbol ";"
   return $ ReturnStmt expr
 
-parseBlock :: Parser Stmt
+parseBlock :: Parser ParsedStmt
 parseBlock = do
   stmts <- braces (many parseStmt)
   return $ SequenceStmt stmts
@@ -284,7 +284,7 @@ parseFormalParameters :: Parser [FormalParameter]
 parseFormalParameters = parens $ sepBy parseFormalParameter (symbol ",")
 
 -- Methods
-parseMethod :: Parser MethodDecl
+parseMethod :: Parser (MethodDecl ())
 parseMethod = do
   decorators <- many parseMethodKind
   name <- parseName
@@ -299,7 +299,7 @@ parseMethod = do
   return $ MethodDecl kind name params returnType body
 
 -- Contract
-parseContract :: Parser Contract
+parseContract :: Parser ParsedContract
 parseContract = do
   _ <- reserved "contract"
   name <- parseName
@@ -310,9 +310,9 @@ parseContract = do
   return $ Contract name storage methods
 
 -- Top-level parser
-parseProgram :: Parser Contract
+parseProgram :: Parser ParsedContract
 parseProgram = spaceConsumer >> parseContract <* eof
 
 -- Public API
-parseContractFromString :: String -> Either (ParseErrorBundle String Void) Contract
+parseContractFromString :: String -> Either (ParseErrorBundle String Void) ParsedContract
 parseContractFromString = parse parseProgram ""

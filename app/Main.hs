@@ -12,7 +12,7 @@ import System.Environment (getArgs)
 import System.Exit (die)
 import System.FilePath ((</>))
 
-import SmartTS.AST (contractName)
+import SmartTS.IR.AST (contractName)
 import SmartTS.Interpreter
 import SmartTS.Parser
 import SmartTS.TypeCheck (typeCheckContract)
@@ -118,13 +118,14 @@ lookupFlagValue flag args =
 runOriginate :: FilePath -> FilePath -> String -> IO ()
 runOriginate repoDir sourcePath argsJsonStr = do
   source <- readFile sourcePath
-  contract <-
+  parsed <-
     case parseContractFromString source of
-      Left e -> die ("Parse error: " ++ show e)
+      Left e  -> die ("Parse error: " ++ show e)
       Right c -> pure c
-  case typeCheckContract contract of
-    Left err -> die ("Type error: " ++ err)
-    Right () -> pure ()
+  contract <-
+    case typeCheckContract parsed of
+      Left err -> die ("Type error: " ++ err)
+      Right c  -> pure c
   argsValue <-
     case eitherDecode (BL.fromStrict (toStrictUtf8 argsJsonStr)) of
       Left e -> die ("Invalid JSON for --args: " ++ e)
@@ -172,13 +173,14 @@ runCall repoDir address entrypoint argsJsonStr = do
         )
     else do
       source <- readFile contractPath
-      contract <-
+      parsed <-
         case parseContractFromString source of
-          Left e -> die ("Parse error: " ++ show e)
+          Left e  -> die ("Parse error: " ++ show e)
           Right c -> pure c
-      case typeCheckContract contract of
-        Left err -> die ("Type error: " ++ err)
-        Right () -> pure ()
+      contract <-
+        case typeCheckContract parsed of
+          Left err -> die ("Type error: " ++ err)
+          Right c  -> pure c
 
       argsValue <-
         case eitherDecode (BL.fromStrict (toStrictUtf8 argsJsonStr)) of
@@ -241,8 +243,8 @@ resolveRepositoryState repoDir (PersistedState m)
               | otherwise ->
                   case typeCheckContract c of
                     Left terr -> return $ Left $ "Type error in " ++ path ++ ": " ++ terr
-                    Right () ->
-                      case contractInstanceFromStorageValue c (persistedStorage pinst) of
+                    Right tc ->
+                      case contractInstanceFromStorageValue tc (persistedStorage pinst) of
                         Left s ->
                           return $
                             Left $
