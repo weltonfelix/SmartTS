@@ -440,7 +440,8 @@ typeCheckTests :: TestTree
 typeCheckTests =
   testGroup
     "Type checker"
-    [ testCase "Minimal well-typed contract" $
+    [ 
+      testCase "Minimal well-typed contract" $
         typeCheckSuccess
           "contract C { storage: { x: int }; @originate init(): int { return 0; } }"
     , testCase "Return type mismatch" $
@@ -473,7 +474,84 @@ typeCheckTests =
               Right (ContractInstance _ st) -> case st of
                 Record [("n", CInt 1), ("b", CBool True)] -> return ()
                 _ -> assertFailure $ "unexpected storage expr: " ++ show st
+
+    -- map<K, V> - casos válidos
+
+    , testCase "map<int, bool> é um tipo de storage válido" $
+        typeCheckSuccess
+          "contract C { storage: { m: map<int, bool> }; @originate init(): unit { return (); } }"
+
+    , testCase "map<bool, int> é um tipo de storage válido" $
+        typeCheckSuccess
+          "contract C { storage: { m: map<bool, int> }; @originate init(): unit { return (); } }"
+
+    , testCase "empty_map com contexto map<int, int> é aceito" $
+        typeCheckSuccess
+          "contract C { storage: { m: map<int, int> }; @originate init(): unit { storage.m = empty_map; return (); } }"
+
+    , testCase "leitura de map via storage.m[k] retorna tipo do valor" $
+        typeCheckSuccess
+          "contract C { storage: { m: map<int, int> }; @entrypoint get(k: int): int { return storage.m[k]; } }"
+
+    , testCase "escrita em storage.m[k] com tipos corretos" $
+        typeCheckSuccess
+          "contract C { storage: { m: map<int, bool> }; @originate init(): unit { storage.m[0] = true; return (); } }"
+
+    , testCase "escrita em var local de mapa com tipos corretos" $
+        typeCheckSuccess
+          "contract C { storage: { x: int }; @entrypoint f(): unit { var m: map<int, int> = empty_map; m[1] = 42; return (); } }"
+
+    , testCase "mem(map, key) retorna bool" $
+        typeCheckSuccess
+          "contract C { storage: { m: map<int, bool> }; @entrypoint f(k: int): bool { return mem(storage.m, k); } }"
+
+    , testCase "remove(map, key) retorna map<K, V>" $
+        typeCheckSuccess
+          "contract C { storage: { m: map<int, bool> }; @entrypoint f(k: int): map<int, bool> { return remove(storage.m, k); } }"
+
+    , testCase "map<int, map<int, bool>> - mapa de mapas (valor pode ser mapa)" $
+        typeCheckSuccess
+          "contract C { storage: { m: map<int, map<int, bool>> }; @originate init(): unit { return (); } }"
+    
+    -- map<K, V> - chave inválida (não comparável)
+    
+    , testCase "map<unit, int> - unit não é comparável como chave" $
+        typeCheckFailure
+          "contract C { storage: { m: map<unit, int> }; @originate init(): unit { storage.m[()] = 1; return (); } }"
+
+    , testCase "map<map<int,int>, bool> - mapa como chave é rejeitado" $
+        typeCheckFailure
+          "contract C { storage: { m: map<int, int> }; @originate init(): unit { var k: map<int, int> = empty_map; storage.m[k] = 1; return (); } }"
+
+    , testCase "empty_map com chave record é rejeitado" $
+        typeCheckFailure
+          "contract C { storage: { m: map<{ x: int }, bool> }; @originate init(): unit { storage.m = empty_map; return (); } }"
+
+    , testCase "acesso storage.m[k] com tipo de chave errado é rejeitado" $
+        typeCheckFailure
+          "contract C { storage: { m: map<int, bool> }; @entrypoint f(k: bool): bool { return storage.m[k]; } }"
+
+    , testCase "escrita storage.m[k] com tipo de valor errado é rejeitado" $
+        typeCheckFailure
+          "contract C { storage: { m: map<int, bool> }; @originate init(): unit { storage.m[0] = 42; return (); } }"
+
+    , testCase "mem(map, key) com chave de tipo errado é rejeitado" $
+        typeCheckFailure
+          "contract C { storage: { m: map<int, bool> }; @entrypoint f(): bool { return mem(storage.m, true); } }"
+
+    , testCase "remove(map, key) com chave de tipo errado é rejeitado" $
+        typeCheckFailure
+          "contract C { storage: { m: map<int, bool> }; @entrypoint f(): map<int, bool> { return remove(storage.m, true); } }"
+
+    , testCase "empty_map sem contexto de tipo é rejeitado" $
+        typeCheckFailure
+          "contract C { storage: { x: int }; @originate init(): unit { var m: int = empty_map; return (); } }"
+
+    , testCase "acesso de campo em não-mapa via [] é rejeitado" $
+        typeCheckFailure
+          "contract C { storage: { x: int }; @entrypoint f(): int { return storage.x[0]; } }"
     ]
+  
 
 errorTests :: TestTree
 errorTests = testGroup "Error Cases"
