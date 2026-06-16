@@ -167,7 +167,7 @@ as well.
 ### Second Milestone: 
 
    * Review the implementation of the type checker and interpreter
-   * Deadline: 07/06
+   * Deadline: 14/06
 
 ### Third Milestone: 
 

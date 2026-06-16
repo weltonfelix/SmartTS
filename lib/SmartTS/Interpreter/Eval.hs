@@ -5,110 +5,110 @@ module SmartTS.Interpreter.Eval where
 
 import Control.Monad.State
 import qualified Data.Map.Strict as M
-import SmartTS.AST
+import SmartTS.IR.AST
 import SmartTS.Interpreter.Runtime
 
 -- ---------------------------------------------------------------------------
 -- Expression evaluation
 -- ---------------------------------------------------------------------------
 
-evalExpr :: Expr -> EvalM Expr
-evalExpr (CInt n) = return (CInt n)
-evalExpr (CBool b) = return (CBool b)
-evalExpr Unit = return Unit
-evalExpr StorageExpr = do
+evalExpr :: TypedExpr -> EvalM TypedExpr
+evalExpr (CInt ty n) = return (CInt ty n)
+evalExpr (CBool ty b) = return (CBool ty b)
+evalExpr (Unit ty) = return (Unit ty)
+evalExpr (StorageExpr _) = do
   rt <- get
   case rtStorage rt of
-    Nothing -> return Unit
-    Just s -> return s
-evalExpr (Var n) = do
+    Nothing -> return (Unit TUnit)
+    Just s  -> return s
+evalExpr (Var _ n) = do
   rt <- get
   case M.lookup n (rtLocals rt) of
-    Just b -> return (bindingValue b)
+    Just b  -> return (bindingValue b)
     Nothing ->
       case M.lookup n (rtParams rt) of
-        Just v -> return v
+        Just v  -> return v
         Nothing -> interpretBug ("unknown variable `" ++ n ++ "` after type check")
-evalExpr (Record fields) = do
+evalExpr (Record ty fields) = do
   fs <- mapM (\(k, e) -> (,) k <$> evalExpr e) fields
-  return (Record fs)
-evalExpr (FieldAccess base fld) = do
+  return (Record ty fs)
+evalExpr (FieldAccess _ base fld) = do
   b <- evalExpr base
   case b of
-    Record fs ->
+    Record _ fs ->
       case lookup fld fs of
-        Just v -> return v
+        Just v  -> return v
         Nothing -> interpretBug ("missing record field `" ++ fld ++ "` after type check")
     _ -> interpretBug "field access on non-record after type check"
-evalExpr (Not e) = do
+evalExpr (Not _ e) = do
   v <- evalExpr e
   case v of
-    CBool b -> return (CBool (not b))
-    _ -> interpretBug "operand of ! was not bool after type check"
-evalExpr (And a b) = boolBin a b (&&)
-evalExpr (Or a b) = boolBin a b (||)
-evalExpr (Add a b) = intBin a b (+)
-evalExpr (Sub a b) = intBin a b (-)
-evalExpr (Mul a b) = intBin a b (*)
-evalExpr (Div a b) = do
+    CBool _ b -> return (CBool TBool (not b))
+    _         -> interpretBug "operand of ! was not bool after type check"
+evalExpr (And _ a b) = boolBin a b (&&)
+evalExpr (Or  _ a b) = boolBin a b (||)
+evalExpr (Add _ a b) = intBin a b (+)
+evalExpr (Sub _ a b) = intBin a b (-)
+evalExpr (Mul _ a b) = intBin a b (*)
+evalExpr (Div _ a b) = do
   x <- evalInt a
   y <- evalInt b
-  if y == 0 then lift (Left "Division by zero.") else return (CInt (x `div` y))
-evalExpr (Mod a b) = do
+  if y == 0 then lift (Left "Division by zero.") else return (CInt TInt (x `div` y))
+evalExpr (Mod _ a b) = do
   x <- evalInt a
   y <- evalInt b
-  if y == 0 then lift (Left "Modulo by zero.") else return (CInt (x `mod` y))
-evalExpr (Eq a b) = CBool <$> ((==) <$> evalExpr a <*> evalExpr b)
-evalExpr (Neq a b) = CBool <$> ((/=) <$> evalExpr a <*> evalExpr b)
-evalExpr (Lt a b) = intCmp a b (<)
-evalExpr (Lte a b) = intCmp a b (<=)
-evalExpr (Gt a b) = intCmp a b (>)
-evalExpr (Gte a b) = intCmp a b (>=)
-evalExpr (Call name args) = do
+  if y == 0 then lift (Left "Modulo by zero.") else return (CInt TInt (x `mod` y))
+evalExpr (Eq  _ a b) = CBool TBool <$> ((==) <$> evalExpr a <*> evalExpr b)
+evalExpr (Neq _ a b) = CBool TBool <$> ((/=) <$> evalExpr a <*> evalExpr b)
+evalExpr (Lt  _ a b) = intCmp a b (<)
+evalExpr (Lte _ a b) = intCmp a b (<=)
+evalExpr (Gt  _ a b) = intCmp a b (>)
+evalExpr (Gte _ a b) = intCmp a b (>=)
+evalExpr (Call _ name args) = do
   rt <- get
   m <- case M.lookup name (rtMethods rt) of
-    Nothing -> interpretBug ("unknown method `" ++ name ++ "` after type check")
-    Just m' -> return m'
+    Nothing  -> interpretBug ("unknown method `" ++ name ++ "` after type check")
+    Just m'  -> return m'
   argVals <- mapM evalExpr args
   outerRt <- get
   let paramNames = [n | FormalParameter n _ <- methodArgs m]
-      params = M.fromList (zip paramNames argVals)
-      innerRt = outerRt {rtParams = params, rtLocals = M.empty}
+      params     = M.fromList (zip paramNames argVals)
+      innerRt    = outerRt {rtParams = params, rtLocals = M.empty}
   (mRet, innerRt') <- lift $ runStateT (execStmt (methodBody m)) innerRt
   -- Propagate storage mutations from the called method back to the caller.
   modify $ \r -> r {rtStorage = rtStorage innerRt'}
   case mRet of
     Nothing -> interpretBug ("method `" ++ name ++ "` did not return a value after type check")
-    Just v -> return v
-evalExpr (MapVal m) = return (MapVal m)
-evalExpr MapEmpty = return (MapVal M.empty)
-evalExpr (MapAccess base key) = do
+    Just v  -> return v
+evalExpr (MapVal ty m) = return (MapVal ty m)
+evalExpr (MapEmpty ty) = return (MapVal ty M.empty)
+evalExpr (MapAccess _ base key) = do
   baseVal <- evalExpr base
   keyVal <- evalExpr key
   case baseVal of
-    MapVal m ->
-        case M.lookup keyVal m of
-          Just v -> return v
-          Nothing -> lift (Left "Runtime Error: Key not found in map.")
+    MapVal _ m ->
+      case M.lookup keyVal m of
+        Just v  -> return v
+        Nothing -> lift (Left "Runtime Error: Key not found in map.")
     _ -> interpretBug "map access on non-map after type check"
-evalExpr (MapMemCheck base key) = do
+evalExpr (MapMemCheck _ base key) = do
   baseVal <- evalExpr base
   keyVal <- evalExpr key
   case baseVal of
-    MapVal m -> return (CBool (M.member keyVal m))
+    MapVal _ m -> return (CBool TBool (M.member keyVal m))
     _ -> interpretBug "mem check on non-map after type check"
-evalExpr (MapRem base key) = do
+evalExpr (MapRem _ base key) = do
   baseVal <- evalExpr base
   keyVal <- evalExpr key
   case baseVal of
-    MapVal m -> return (MapVal (M.delete keyVal m))
+    MapVal ty m -> return (MapVal ty (M.delete keyVal m))
     _ -> interpretBug "map remove on non-map after type check"
 
 -- ---------------------------------------------------------------------------
 -- Statement execution
 -- ---------------------------------------------------------------------------
 
-execStmt :: Stmt -> EvalM (Maybe Expr)
+execStmt :: TypedStmt -> EvalM (Maybe TypedExpr)
 execStmt (SequenceStmt ss) = execSequence ss
 execStmt (ReturnStmt e) = Just <$> evalExpr e
 execStmt (VarDeclStmt n _ e) = do
@@ -126,8 +126,8 @@ execStmt (AssignmentStmt lv e) = do
 execStmt (IfStmt cond thenS elseS) = do
   c <- evalExpr cond
   case c of
-    CBool True -> execStmt thenS
-    CBool False ->
+    CBool _ True  -> execStmt thenS
+    CBool _ False ->
       case elseS of
         Nothing -> return Nothing
         Just es -> execStmt es
@@ -137,27 +137,27 @@ execStmt (WhileStmt cond body) = loop
     loop = do
       c <- evalExpr cond
       case c of
-        CBool False -> return Nothing
-        CBool True -> do
+        CBool _ False -> return Nothing
+        CBool _ True  -> do
           ret <- execStmt body
           case ret of
-            Just v -> return (Just v)
+            Just v  -> return (Just v)
             Nothing -> loop
         _ -> interpretBug "while condition was not bool after type check"
 
-execSequence :: [Stmt] -> EvalM (Maybe Expr)
+execSequence :: [TypedStmt] -> EvalM (Maybe TypedExpr)
 execSequence [] = return Nothing
 execSequence (s : ss) = do
   ret <- execStmt s
   case ret of
-    Just v -> return (Just v)
+    Just v  -> return (Just v)
     Nothing -> execSequence ss
 
 -- ---------------------------------------------------------------------------
 -- LValue assignment helpers
 -- ---------------------------------------------------------------------------
 
-assignLValue :: LValue -> Expr -> EvalM ()
+assignLValue :: TypedLValue -> TypedExpr -> EvalM ()
 assignLValue LStorage v =
   modify $ \rt -> rt {rtStorage = Just v}
 assignLValue (LVar n) v = do
@@ -175,89 +175,89 @@ assignLValue (LField lv fld) v = do
   rt <- get
   let (root, path) = flattenLValue lv [fld]
   rootExpr <- lift $ resolveRootExpr rt root
-  updated <- lift $ setFieldPath rootExpr path v
+  updated  <- lift $ setFieldPath rootExpr path v
   assignLValue root updated
 assignLValue (LMapAccess lv key) v = do
   keyVal <- evalExpr key
   baseVal <- evalExpr (lValueToExpr lv)
   case baseVal of
-    MapVal m -> assignLValue lv (MapVal (M.insert keyVal v m))
+    MapVal ty m -> assignLValue lv (MapVal ty (M.insert keyVal v m))
     _ -> interpretBug "map assignment on non-map after type check"
 
-lValueToExpr :: LValue -> Expr
-lValueToExpr LStorage = StorageExpr
-lValueToExpr (LVar name) = Var name
-lValueToExpr (LField lv name) = FieldAccess (lValueToExpr lv) name
-lValueToExpr (LMapAccess lv key) = MapAccess (lValueToExpr lv) key
+lValueToExpr :: TypedLValue -> TypedExpr
+lValueToExpr LStorage = StorageExpr TUnit
+lValueToExpr (LVar name) = Var TUnit name
+lValueToExpr (LField lv name) = FieldAccess TUnit (lValueToExpr lv) name
+lValueToExpr (LMapAccess lv key) = MapAccess TUnit (lValueToExpr lv) key
 
-flattenLValue :: LValue -> [Name] -> (LValue, [Name])
-flattenLValue LStorage acc = (LStorage, acc)
-flattenLValue (LVar n) acc = (LVar n, acc)
-flattenLValue (LField parent fld) acc = flattenLValue parent (fld : acc)
+flattenLValue :: TypedLValue -> [Name] -> (TypedLValue, [Name])
+flattenLValue LStorage      acc = (LStorage, acc)
+flattenLValue (LVar n)      acc = (LVar n, acc)
+flattenLValue (LField p fld) acc = flattenLValue p (fld : acc)
 flattenLValue (LMapAccess _ _) _ = error "Map updates must be handled by assignLValue directly, not flattened."
 
-resolveRootExpr :: Runtime -> LValue -> Either String Expr
+resolveRootExpr :: Runtime -> TypedLValue -> Either String TypedExpr
 resolveRootExpr rt LStorage =
   case rtStorage rt of
-    Nothing -> Right (Record [])
-    Just s -> Right s
+    Nothing -> Right (Record (TRecord []) [])
+    Just s  -> Right s
 resolveRootExpr rt (LVar n) =
   case M.lookup n (rtLocals rt) of
-    Just b -> Right (bindingValue b)
+    Just b  -> Right (bindingValue b)
     Nothing ->
       case M.lookup n (rtParams rt) of
-        Just _ -> interpretBug ("field update through parameter `" ++ n ++ "` after type check")
+        Just _  -> interpretBug ("field update through parameter `" ++ n ++ "` after type check")
         Nothing -> interpretBug ("unknown root for field update `" ++ n ++ "` after type check")
 resolveRootExpr _ _ = interpretBug "invalid root for field update"
 
-setFieldPath :: Expr -> [Name] -> Expr -> Either String Expr
-setFieldPath _ [] _ = interpretBug "empty field path in assignment"
-setFieldPath base [f] v = setField base f v
+setFieldPath :: TypedExpr -> [Name] -> TypedExpr -> Either String TypedExpr
+setFieldPath _ [] _          = interpretBug "empty field path in assignment"
+setFieldPath base [f] v      = setField base f v
 setFieldPath base (f : fs) v = do
-  child <- getOrCreateField base f
+  child  <- getOrCreateField base f
   child' <- setFieldPath child fs v
   setField base f child'
 
-getOrCreateField :: Expr -> Name -> Either String Expr
-getOrCreateField (Record fields) f =
+getOrCreateField :: TypedExpr -> Name -> Either String TypedExpr
+getOrCreateField (Record _ fields) f =
   case lookup f fields of
-    Just v -> Right v
-    Nothing -> Right (Record [])
-getOrCreateField Unit _ = Right (Record [])
+    Just v  -> Right v
+    Nothing -> Right (Record (TRecord []) [])
+getOrCreateField (Unit _) _ = Right (Record (TRecord []) [])
 getOrCreateField _ _ = interpretBug "field path through non-record value after type check"
 
-setField :: Expr -> Name -> Expr -> Either String Expr
-setField (Record fields) f v = Right (Record (insertOrReplace f v fields))
-setField Unit f v = Right (Record [(f, v)])
-setField _ _ _ = interpretBug "setField on non-record after type check"
+setField :: TypedExpr -> Name -> TypedExpr -> Either String TypedExpr
+setField (Record ty fields) f v = Right (Record ty (insertOrReplace f v fields))
+setField (Unit _) f v           = Right (Record (TRecord [(f, exprAnn v)]) [(f, v)])
+setField _ _ _                  = interpretBug "setField on non-record after type check"
 
-insertOrReplace :: Name -> Expr -> [(Name, Expr)] -> [(Name, Expr)]
+insertOrReplace :: Name -> TypedExpr -> [(Name, TypedExpr)] -> [(Name, TypedExpr)]
 insertOrReplace k v [] = [(k, v)]
 insertOrReplace k v ((k0, v0) : rest)
-  | k == k0 = (k, v) : rest
+  | k == k0   = (k, v) : rest
   | otherwise = (k0, v0) : insertOrReplace k v rest
 
 -- ---------------------------------------------------------------------------
 -- Internal helpers
 -- ---------------------------------------------------------------------------
 
-evalInt :: Expr -> EvalM Int
+evalInt :: TypedExpr -> EvalM Int
 evalInt e = do
   v <- evalExpr e
   case v of
-    CInt n -> return n
-    _ -> interpretBug "expected int subexpression after type check"
+    CInt _ n -> return n
+    _        -> interpretBug "expected int subexpression after type check"
 
-intBin :: Expr -> Expr -> (Int -> Int -> Int) -> EvalM Expr
-intBin a b op = CInt <$> (op <$> evalInt a <*> evalInt b)
+intBin :: TypedExpr -> TypedExpr -> (Int -> Int -> Int) -> EvalM TypedExpr
+intBin a b op = CInt TInt <$> (op <$> evalInt a <*> evalInt b)
 
-boolBin :: Expr -> Expr -> (Bool -> Bool -> Bool) -> EvalM Expr
+boolBin :: TypedExpr -> TypedExpr -> (Bool -> Bool -> Bool) -> EvalM TypedExpr
 boolBin a b op = do
   x <- evalExpr a
   y <- evalExpr b
   case (x, y) of
-    (CBool bx, CBool by) -> return (CBool (op bx by))
-    _ -> interpretBug "boolean operator on non-bool after type check"
+    (CBool _ bx, CBool _ by) -> return (CBool TBool (op bx by))
+    _                        -> interpretBug "boolean operator on non-bool after type check"
 
-intCmp :: Expr -> Expr -> (Int -> Int -> Bool) -> EvalM Expr
-intCmp a b op = CBool <$> (op <$> evalInt a <*> evalInt b)
+intCmp :: TypedExpr -> TypedExpr -> (Int -> Int -> Bool) -> EvalM TypedExpr
+intCmp a b op = CBool TBool <$> (op <$> evalInt a <*> evalInt b)

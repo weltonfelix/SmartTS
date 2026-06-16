@@ -8,13 +8,13 @@ import Data.List (stripPrefix)
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import Data.Text.Encoding (encodeUtf8)
-import SmartTS.AST
+import SmartTS.IR.AST
 
 type Address = Name
 
 data ContractInstance = ContractInstance
   { instanceContractName :: Name
-  , instanceStorage :: Expr
+  , instanceStorage :: TypedExpr
   }
   deriving (Eq, Show)
 
@@ -22,15 +22,15 @@ type RepositoryState = M.Map Address ContractInstance
 
 data Binding = Binding
   { bindingMutable :: Bool
-  , bindingValue :: Expr
+  , bindingValue :: TypedExpr
   }
   deriving (Eq, Show)
 
 data Runtime = Runtime
-  { rtStorage :: Maybe Expr
-  , rtParams :: M.Map Name Expr
-  , rtLocals :: M.Map Name Binding
-  , rtMethods :: M.Map Name MethodDecl
+  { rtStorage :: Maybe TypedExpr
+  , rtParams  :: M.Map Name TypedExpr
+  , rtLocals  :: M.Map Name Binding
+  , rtMethods :: M.Map Name (MethodDecl Type)
   }
   deriving (Eq, Show)
 
