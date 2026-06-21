@@ -6,8 +6,17 @@ import Test.Tasty
 import Test.Tasty.HUnit
 import SmartTS.IR.AST
 import SmartTS.Parser
-import Data.Aeson (object, (.=))
-import SmartTS.Interpreter (ContractInstance (..), contractInstanceFromStorageValue)
+import Data.Aeson (Value (..), object, (.=))
+import qualified Data.Map.Strict as M
+import qualified Data.Vector as V
+import SmartTS.Interpreter
+  ( ContractInstance (..)
+  , contractInstanceFromStorageValue
+  , exprToJson
+  , jsonToExprByType
+  , originateWithJsonArgs
+  , callEntrypointWithJsonArgs
+  )
 import SmartTS.TypeCheck (typeCheckContract)
 
 main :: IO ()
@@ -27,6 +36,8 @@ tests =
         , errorTests
         ]
     , typeCheckTests
+    , codecTests
+    , e2eTests
     ]
 
 -- Helper function to parse and assert success
@@ -297,6 +308,73 @@ expressionTests = testGroup "Expression Parsing"
             ] ->
               return ()
           _ -> assertFailure $ "Expected projection on record literal, got: " ++ show contract
+
+  , testCase "Map type in return type (map<int, bool>)" $
+      parseSuccess "contract Test { storage: { x: int }; @entrypoint get(): map<int, bool> { return empty_map; } }" $ \contract ->
+        case contract of
+          Contract _ _ [MethodDecl _ "get" [] (TMap TInt TBool) (SequenceStmt [ReturnStmt (MapEmpty _)])] ->
+            return ()
+          _ -> assertFailure $ "Expected map<int, bool> return type with empty_map, got: " ++ show contract
+
+  , testCase "empty_map expression" $
+      parseSuccess "contract Test { storage: { x: int }; @entrypoint get(): map<int, int> { return empty_map; } }" $ \contract ->
+        case contract of
+          Contract _ _ [MethodDecl _ "get" [] (TMap TInt TInt) (SequenceStmt [ReturnStmt (MapEmpty _)])] ->
+            return ()
+          _ -> assertFailure $ "Expected empty_map, got: " ++ show contract
+
+  , testCase "Map index read (m[k])" $
+      parseSuccess "contract Test { storage: { m: map<int, bool> }; @entrypoint get(k: int): bool { return m[k]; } }" $ \contract ->
+        case contract of
+          Contract _ _
+            [ MethodDecl _ "get" [FormalParameter "k" TInt] TBool
+                (SequenceStmt [ReturnStmt (MapAccess _ (Var _ "m") (Var _ "k"))])
+            ] ->
+              return ()
+          _ -> assertFailure $ "Expected m[k] map access, got: " ++ show contract
+
+  , testCase "Map index read with literal key (m[0])" $
+      parseSuccess "contract Test { storage: { m: map<int, bool> }; @entrypoint get(): bool { return m[0]; } }" $ \contract ->
+        case contract of
+          Contract _ _
+            [ MethodDecl _ "get" [] TBool
+                (SequenceStmt [ReturnStmt (MapAccess _ (Var _ "m") (CInt _ 0))])
+            ] ->
+              return ()
+          _ -> assertFailure $ "Expected m[0] map access, got: " ++ show contract
+
+  , testCase "Nested storage map index read (storage.m[k])" $
+      parseSuccess "contract Test { storage: { m: map<int, bool> }; @entrypoint get(k: int): bool { return storage.m[k]; } }" $ \contract ->
+        case contract of
+          Contract _ _
+            [ MethodDecl _ "get" [FormalParameter "k" TInt] TBool
+                (SequenceStmt
+                  [ReturnStmt (MapAccess _ (FieldAccess _ (StorageExpr _) "m") (Var _ "k"))])
+            ] ->
+              return ()
+          _ -> assertFailure $ "Expected storage.m[k] map access, got: " ++ show contract
+
+  , testCase "mem(map, key) expression" $
+      parseSuccess "contract Test { storage: { m: map<int, bool> }; @entrypoint has(k: int): bool { return mem(storage.m, k); } }" $ \contract ->
+        case contract of
+          Contract _ _
+            [ MethodDecl _ "has" [FormalParameter "k" TInt] TBool
+                (SequenceStmt
+                  [ReturnStmt (MapMemCheck _ (FieldAccess _ (StorageExpr _) "m") (Var _ "k"))])
+            ] ->
+              return ()
+          _ -> assertFailure $ "Expected mem(storage.m, k), got: " ++ show contract
+
+  , testCase "remove(map, key) expression" $
+      parseSuccess "contract Test { storage: { m: map<int, bool> }; @entrypoint drop(k: int): map<int, bool> { return remove(storage.m, k); } }" $ \contract ->
+        case contract of
+          Contract _ _
+            [ MethodDecl _ "drop" [FormalParameter "k" TInt] (TMap TInt TBool)
+                (SequenceStmt
+                  [ReturnStmt (MapRem _ (FieldAccess _ (StorageExpr _) "m") (Var _ "k"))])
+            ] ->
+              return ()
+          _ -> assertFailure $ "Expected remove(storage.m, k), got: " ++ show contract
   ]
 
 statementTests :: TestTree
@@ -434,6 +512,46 @@ statementTests = testGroup "Statement Parsing"
             ] ->
               return ()
           _ -> assertFailure $ "Expected local record field assignment, got: " ++ show contract
+
+  , testCase "var declaration with empty_map initializer" $
+      parseSuccess "contract Test { storage: { x: int }; @entrypoint f(): unit { var m: map<int, int> = empty_map; return (); } }" $ \contract ->
+        case contract of
+          Contract _ _
+            [ MethodDecl _ "f" [] TUnit
+                (SequenceStmt
+                  [ VarDeclStmt "m" (TMap TInt TInt) (MapEmpty _)
+                  , ReturnStmt (Unit _)
+                  ])
+            ] ->
+              return ()
+          _ -> assertFailure $ "Expected var m: map<int,int> = empty_map, got: " ++ show contract
+
+  , testCase "Map index assignment (m[k] = v)" $
+      parseSuccess "contract Test { storage: { x: int }; @entrypoint f(): unit { var m: map<int, bool> = empty_map; m[1] = true; return (); } }" $ \contract ->
+        case contract of
+          Contract _ _
+            [ MethodDecl _ "f" [] TUnit
+                (SequenceStmt
+                  [ VarDeclStmt "m" (TMap TInt TBool) (MapEmpty _)
+                  , AssignmentStmt (LMapAccess (LVar "m") (CInt _ 1)) (CBool _ True)
+                  , ReturnStmt (Unit _)
+                  ])
+            ] ->
+              return ()
+          _ -> assertFailure $ "Expected m[1] = true assignment, got: " ++ show contract
+
+  , testCase "Storage map index assignment (storage.m[k] = v)" $
+      parseSuccess "contract Test { storage: { m: map<int, bool> }; @entrypoint f(k: int): unit { storage.m[k] = true; return (); } }" $ \contract ->
+        case contract of
+          Contract _ _
+            [ MethodDecl _ "f" [FormalParameter "k" TInt] TUnit
+                (SequenceStmt
+                  [ AssignmentStmt (LMapAccess (LField LStorage "m") (Var _ "k")) (CBool _ True)
+                  , ReturnStmt (Unit _)
+                  ])
+            ] ->
+              return ()
+          _ -> assertFailure $ "Expected storage.m[k] = true assignment, got: " ++ show contract
   ]
 
 typeCheckTests :: TestTree
@@ -580,3 +698,191 @@ errorTests = testGroup "Error Cases"
   , testCase "Invalid expression syntax" $
       parseFailure "contract Test { storage: { x: int }; @entrypoint test(): int { return +; } }"
   ]
+
+codecTests :: TestTree
+codecTests =
+  testGroup
+    "Codec: map<K, V> JSON"
+    [ testCase "exprToJson encodes empty map as empty array" $
+        exprToJson (MapVal (TMap TInt TBool) M.empty) @?= Array V.empty
+
+    , testCase "exprToJson encodes map<int, bool> as array of {key, value}" $
+        let m = MapVal (TMap TInt TBool) (M.fromList [(CInt TInt 1, CBool TBool True)])
+         in exprToJson m @?= Array (V.singleton (object ["key" .= (1 :: Int), "value" .= True]))
+
+    , testCase "exprToJson encodes map<bool, int> as array of {key, value}" $
+        let m = MapVal (TMap TBool TInt) (M.fromList [(CBool TBool False, CInt TInt 9)])
+         in exprToJson m @?= Array (V.singleton (object ["key" .= False, "value" .= (9 :: Int)]))
+
+    , testCase "jsonToExprByType decodes [] into an empty map<int, bool>" $
+        case jsonToExprByType (TMap TInt TBool) (Array V.empty) of
+          Left err -> assertFailure err
+          Right (MapVal _ m) -> assertEqual "empty map" M.empty m
+          Right other -> assertFailure $ "Expected MapVal, got: " ++ show other
+
+    , testCase "jsonToExprByType decodes [{key,value}, ...] into map<int, bool>" $
+        let json = Array $ V.fromList
+              [ object ["key" .= (1 :: Int), "value" .= True]
+              , object ["key" .= (2 :: Int), "value" .= False]
+              ]
+         in case jsonToExprByType (TMap TInt TBool) json of
+              Left err -> assertFailure err
+              Right (MapVal _ m) ->
+                assertEqual
+                  "decoded entries"
+                  (M.fromList [(CInt TInt 1, CBool TBool True), (CInt TInt 2, CBool TBool False)])
+                  m
+              Right other -> assertFailure $ "Expected MapVal, got: " ++ show other
+
+    , testCase "jsonToExprByType rejects a map entry missing \"value\"" $
+        let json = Array (V.singleton (object ["key" .= (1 :: Int)]))
+         in case jsonToExprByType (TMap TInt TBool) json of
+              Left _  -> return ()
+              Right _ -> assertFailure "Expected decoding failure for missing \"value\" field"
+
+    , testCase "jsonToExprByType rejects a non-array for a map type" $
+        case jsonToExprByType (TMap TInt TBool) (object ["1" .= True]) of
+          Left _  -> return ()
+          Right _ -> assertFailure "Expected decoding failure: a map must be a JSON array"
+
+    , testCase "Round-trip: map<int, bool> survives exprToJson . jsonToExprByType" $
+        let original = M.fromList [(CInt TInt 1, CBool TBool True), (CInt TInt 2, CBool TBool False)]
+            json = exprToJson (MapVal (TMap TInt TBool) original)
+         in case jsonToExprByType (TMap TInt TBool) json of
+              Left err -> assertFailure err
+              Right (MapVal _ m) -> assertEqual "round-tripped map" original m
+              Right other -> assertFailure $ "Expected MapVal, got: " ++ show other
+
+    , testCase "Storage with map field decodes via contractInstanceFromStorageValue" $
+        parseSuccess
+          "contract C { storage: { admin_id: int, members: map<int, bool> }; @originate init(): unit { return (); } }"
+          $ \c ->
+            let storageJson =
+                  object
+                    [ "admin_id" .= (7 :: Int)
+                    , "members" .=
+                        Array (V.singleton (object ["key" .= (1 :: Int), "value" .= True]))
+                    ]
+             in case contractInstanceFromStorageValue c storageJson of
+                  Left err -> assertFailure err
+                  Right (ContractInstance _ st) -> case st of
+                    Record _ [("admin_id", CInt _ 7), ("members", MapVal _ m)] ->
+                      assertEqual
+                        "members map"
+                        (M.fromList [(CInt TInt 1, CBool TBool True)])
+                        m
+                    _ -> assertFailure $ "unexpected storage expr: " ++ show st
+    ]
+
+membershipSource :: String
+membershipSource =
+  "contract Membership {\n\
+  \  storage: {\n\
+  \    admin_id: int,\n\
+  \    members: map<int, bool>\n\
+  \  };\n\
+  \\n\
+  \  @originate\n\
+  \  init(admin: int): unit {\n\
+  \    storage.admin_id = admin;\n\
+  \    storage.members = empty_map;\n\
+  \    return ();\n\
+  \  }\n\
+  \\n\
+  \  @entrypoint\n\
+  \  addMember(new_user: int): unit {\n\
+  \    storage.members[new_user] = true;\n\
+  \    return ();\n\
+  \  }\n\
+  \\n\
+  \  @entrypoint\n\
+  \  removeMember(user: int): bool {\n\
+  \    if (mem(storage.members, user)) {\n\
+  \      storage.members = remove(storage.members, user);\n\
+  \      return true;\n\
+  \    }\n\
+  \    return false;\n\
+  \  }\n\
+  \}"
+
+membershipTypedContract :: TypedContract
+membershipTypedContract =
+  case parseContractFromString membershipSource of
+    Left err -> error ("Membership.smartts failed to parse: " ++ show err)
+    Right c -> case typeCheckContract c of
+      Left err -> error ("Membership.smartts failed to type-check: " ++ err)
+      Right tc -> tc
+
+e2eTests :: TestTree
+e2eTests =
+  testGroup
+    "End-to-end: Membership.smartts"
+    [ testCase "originate initializes storage with admin_id and an empty members map" $
+        case originateWithJsonArgs M.empty membershipTypedContract membershipSource (object ["admin" .= (1 :: Int)]) of
+          Left err -> assertFailure err
+          Right (_, repo) -> case M.toList repo of
+            [(_, ContractInstance "Membership" (Record _ [("admin_id", CInt _ 1), ("members", MapVal _ m)]))] ->
+              assertEqual "members starts empty" M.empty m
+            other -> assertFailure $ "Unexpected repository contents: " ++ show other
+
+    , testCase "addMember inserts the new user into storage.members" $ do
+        (addr, repo0) <-
+          case originateWithJsonArgs M.empty membershipTypedContract membershipSource (object ["admin" .= (1 :: Int)]) of
+            Left err -> assertFailure err >> error "unreachable"
+            Right ok -> return ok
+        case callEntrypointWithJsonArgs repo0 membershipTypedContract addr "addMember" membershipSource (object ["new_user" .= (42 :: Int)]) of
+          Left err -> assertFailure err
+          Right (_, repo1) -> case M.lookup addr repo1 of
+            Just (ContractInstance _ (Record _ [("admin_id", _), ("members", MapVal _ m)])) ->
+              assertEqual "members has the new user" (M.fromList [(CInt TInt 42, CBool TBool True)]) m
+            other -> assertFailure $ "Unexpected instance: " ++ show other
+
+    , testCase "removeMember(user) returns true and removes a present member" $ do
+        (addr, repo0) <-
+          case originateWithJsonArgs M.empty membershipTypedContract membershipSource (object ["admin" .= (1 :: Int)]) of
+            Left err -> assertFailure err >> error "unreachable"
+            Right ok -> return ok
+        repo1 <-
+          case callEntrypointWithJsonArgs repo0 membershipTypedContract addr "addMember" membershipSource (object ["new_user" .= (42 :: Int)]) of
+            Left err -> assertFailure err >> error "unreachable"
+            Right (_, r) -> return r
+        case callEntrypointWithJsonArgs repo1 membershipTypedContract addr "removeMember" membershipSource (object ["user" .= (42 :: Int)]) of
+          Left err -> assertFailure err
+          Right (ret, repo2) -> do
+            assertEqual "removeMember returns true" (Just (CBool TBool True)) ret
+            case M.lookup addr repo2 of
+              Just (ContractInstance _ (Record _ [("admin_id", _), ("members", MapVal _ m)])) ->
+                assertEqual "members is empty after removal" M.empty m
+              other -> assertFailure $ "Unexpected instance: " ++ show other
+
+    , testCase "removeMember(user) returns false for an absent member" $ do
+        (addr, repo0) <-
+          case originateWithJsonArgs M.empty membershipTypedContract membershipSource (object ["admin" .= (1 :: Int)]) of
+            Left err -> assertFailure err >> error "unreachable"
+            Right ok -> return ok
+        case callEntrypointWithJsonArgs repo0 membershipTypedContract addr "removeMember" membershipSource (object ["user" .= (99 :: Int)]) of
+          Left err -> assertFailure err
+          Right (ret, _) -> assertEqual "removeMember returns false" (Just (CBool TBool False)) ret
+
+    , testCase "Full round-trip: originate, persist storage to JSON, reload, call entrypoint" $ do
+        (addr, repo0) <-
+          case originateWithJsonArgs M.empty membershipTypedContract membershipSource (object ["admin" .= (1 :: Int)]) of
+            Left err -> assertFailure err >> error "unreachable"
+            Right ok -> return ok
+        repo1 <-
+          case callEntrypointWithJsonArgs repo0 membershipTypedContract addr "addMember" membershipSource (object ["new_user" .= (7 :: Int)]) of
+            Left err -> assertFailure err >> error "unreachable"
+            Right (_, r) -> return r
+        ci0 <- case M.lookup addr repo1 of
+          Nothing -> assertFailure "Missing contract instance after addMember" >> error "unreachable"
+          Just c  -> return c
+        let storageJson = exprToJson (instanceStorage ci0)
+        reloadedStorage <-
+          case contractInstanceFromStorageValue membershipTypedContract storageJson of
+            Left err -> assertFailure err >> error "unreachable"
+            Right ci -> return ci
+        let repo2 = M.insert addr reloadedStorage repo1
+        case callEntrypointWithJsonArgs repo2 membershipTypedContract addr "removeMember" membershipSource (object ["user" .= (7 :: Int)]) of
+          Left err -> assertFailure err
+          Right (ret, _) -> assertEqual "removeMember finds the reloaded member" (Just (CBool TBool True)) ret
+    ]
