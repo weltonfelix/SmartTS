@@ -21,6 +21,35 @@ translateExpression (A.And ty e1 e2) = translateBinaryExpression e1 e2 ty L.Prim
 translateExpression (A.Or  ty e1 e2) = translateBinaryExpression e1 e2 ty L.PrimOr
 translateExpression (A.Not ty e)     = translateUnaryExpression e ty L.PrimNot
 -- TODO: Write here the translation of the remaining expressions.
+translateExpression (A.MapRem ty mapExpr keyExpr) =
+  let mapExpr' = translateExpression mapExpr
+      keyExpr' = translateExpression keyExpr
+      valTy = case translateType ty of
+        L.TMap _ v -> v
+        _ -> error "Cannot perform MapRem in a non-map type"
+      noneExpr = L.Expr (L.Prim (L.PrimNone valTy) []) (L.TOption valTy)
+   in mkExpr (L.Prim L.PrimUpdate [keyExpr', noneExpr, mapExpr']) ty
+
+-- Translate an assignment to an LValue into an LLTZ expression.
+compileAssignLValue :: A.TypedLValue -> L.Expr -> L.Expr
+compileAssignLValue (A.LVar var) expr = L.Expr (L.Assign (L.MutVar var) expr) L.TUnit
+compileAssignLValue (A.LMapAccess lv key) expr =
+  let keyExpr' = translateExpression key
+      valTy = L.exprType expr
+      someExpr = L.Expr (L.Prim L.PrimSome [expr]) (L.TOption valTy)
+
+      mapExpr' = translateExpression (lValueToExpr lv)
+
+      mapTy = L.exprType mapExpr'
+      updateExpr = L.Expr (L.Prim L.PrimUpdate [keyExpr', someExpr, mapExpr']) mapTy
+   in compileAssignLValue lv updateExpr
+
+-- Translate an LValue into an LLTZ expression. This is used to read from the LValue.
+lValueToExpr :: A.TypedLValue -> A.TypedExpr
+lValueToExpr A.LStorage = A.StorageExpr A.TUnit
+lValueToExpr (A.LVar name) = A.Var A.TUnit name
+lValueToExpr (A.LField lv name) = A.FieldAccess A.TUnit (lValueToExpr lv) name
+lValueToExpr (A.LMapAccess lv key) = A.MapAccess A.TUnit (lValueToExpr lv) key
 
 -- | Translate a SmartTS block (a list of statements) into a nested LLTZ let-expression.
 --
@@ -48,8 +77,7 @@ translateBlock (s:ss) =
 translateStatement :: A.TypedStmt -> L.Expr
 -- Translate the variable assignment statement.
 -- TODO: Deal with the remaining LValues (storage and record field).
-translateStatement (A.AssignmentStmt (A.LVar name) expr) =
-  L.Expr (L.Assign (L.MutVar name) (translateExpression expr)) L.TUnit
+translateStatement (A.AssignmentStmt lv expr) = compileAssignLValue lv (translateExpression expr)
 -- Translate the if-then-else statement.
 translateStatement (A.IfStmt cond s1 (Just s2)) =
   let cond' = translateExpression cond
@@ -57,16 +85,16 @@ translateStatement (A.IfStmt cond s1 (Just s2)) =
       s2'   = translateStatement s2
   in
     -- Branch type equality is guaranteed by the type checker; the assert
-    -- is a defensive check that catches any inconsistency in this pass.
-    assert
-      (L.exprType s1' == L.exprType s2')
-      "[Impossible] Inconsistent branch types."
-      (L.Expr (L.IfBool cond' s1' s2') (L.exprType s1'))
+      -- is a defensive check that catches any inconsistency in this pass.
+      assert
+        (L.exprType s1' == L.exprType s2')
+        "[Impossible] Inconsistent branch types."
+        (L.Expr (L.IfBool cond' s1' s2') (L.exprType s1'))
 -- Translate the if-then statement (no else branch).
 translateStatement (A.IfStmt cond s1 Nothing) =
   let cond' = translateExpression cond
       s1'   = translateStatement s1
-  in L.Expr (L.IfBool cond' s1' (L.Expr L.Skip L.TUnit)) (L.exprType s1')
+   in L.Expr (L.IfBool cond' s1' (L.Expr L.Skip L.TUnit)) (L.exprType s1')
 -- Translate the while statement.
 -- The result type is TUnit because Michelson's LOOP instruction does not produce
 -- a value: when the loop exits the stack is in the same state as before the
@@ -74,7 +102,7 @@ translateStatement (A.IfStmt cond s1 Nothing) =
 translateStatement (A.WhileStmt cond block) =
   let cond'  = translateExpression cond
       block' = translateStatement block
-  in L.Expr (L.While cond' block') L.TUnit
+   in L.Expr (L.While cond' block') L.TUnit
 -- In LLTZ (an expression-based IR) there is no explicit return construct:
 -- the value of the last expression in a block is the return value.
 translateStatement (A.ReturnStmt expr) = translateExpression expr
@@ -92,8 +120,9 @@ translateUnaryExpression e ty prim = mkExpr (L.Prim prim [e']) ty
 
 translateBinaryExpression :: A.TypedExpr -> A.TypedExpr -> A.Type -> L.Primitive -> L.Expr
 translateBinaryExpression left right ty prim = mkExpr (L.Prim prim [left', right']) ty
-  where left'  = translateExpression left
-        right' = translateExpression right
+  where
+    left'  = translateExpression left
+    right' = translateExpression right
 
 assert :: Bool -> String -> a -> a
 assert False msg _ = error msg
