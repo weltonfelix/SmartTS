@@ -2,6 +2,7 @@ module SmartTS.CodeGen.CompileLLTZ where
 
 import qualified SmartTS.IR.AST as A
 import qualified SmartTS.IR.LLTZ as L
+import qualified Data.Map.Strict as M
 
 translateType :: A.Type -> L.Type
 translateType A.TInt             = L.TInt
@@ -10,6 +11,7 @@ translateType A.TUnit            = L.TUnit
 translateType (A.TRecord fields) = L.TTuple (L.RowNode (map toLeaf fields))
   where
     toLeaf (name, ty) = L.RowLeaf (Just (L.Label name)) (translateType ty)
+translateType (A.TMap k v) = L.TMap (translateType k) (translateType v)
 
 -- Basic Expressions
 translateExpression :: A.TypedExpr -> L.Expr
@@ -20,6 +22,24 @@ translateExpression (A.Var   ty name)  = mkExpr (L.Variable (L.Var name)) ty
 translateExpression (A.And ty e1 e2) = translateBinaryExpression e1 e2 ty L.PrimAnd
 translateExpression (A.Or  ty e1 e2) = translateBinaryExpression e1 e2 ty L.PrimOr
 translateExpression (A.Not ty e)     = translateUnaryExpression e ty L.PrimNot
+translateExpression (A.MapEmpty ty) =
+  let lt = translateType ty
+   in case lt of
+        L.TMap k v -> L.Expr (L.Prim (L.PrimEmptyMap k v) []) lt
+        _ -> error "[Impossible] MapEmpty with non-map type after type checker."
+translateExpression (A.MapVal ty m) =
+  let lt = translateType ty
+   in case lt of
+        L.TMap k v ->
+          foldr
+            (\(kExpr, vExpr) acc ->
+              let kExpr' = translateExpression kExpr
+                  vExpr' = translateExpression vExpr
+                  someV  = L.Expr (L.Prim L.PrimSome [vExpr']) (L.TOption v)
+               in L.Expr (L.Prim L.PrimUpdate [kExpr', someV, acc]) lt)
+            (L.Expr (L.Prim (L.PrimEmptyMap k v) []) lt)
+            (M.toList m)
+        _ -> error "[Impossible] MapVal with non-map type after type checker."
 -- TODO: Write here the translation of the remaining expressions.
 translateExpression (A.MapRem ty mapExpr keyExpr) =
   let mapExpr' = translateExpression mapExpr
