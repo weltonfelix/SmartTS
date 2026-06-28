@@ -18,6 +18,8 @@ import SmartTS.Interpreter
   , callEntrypointWithJsonArgs
   )
 import SmartTS.TypeCheck (typeCheckContract)
+import qualified SmartTS.IR.LLTZ as L
+import SmartTS.CodeGen.CompileLLTZ (translateExpression)
 
 main :: IO ()
 main = defaultMain tests
@@ -26,7 +28,8 @@ tests :: TestTree
 tests =
   testGroup
     "SmartTS"
-    [ testGroup
+    [ codegenTests
+      ,testGroup
         "Parser Tests"
         [ contractTests
         , storageTests
@@ -39,6 +42,40 @@ tests =
     , codecTests
     , e2eTests
     ]
+
+codegenTests :: TestTree
+codegenTests = testGroup "CodeGen: CompileLLTZ"
+  [ testCase "MapMemCheck traduz para PrimMem com ordem [key, map]" $
+      let typed = MapMemCheck TBool (Var (TMap TInt TBool) "m") (Var TInt "k")
+          result = translateExpression typed
+      in case L.exprDesc result of
+           L.Prim L.PrimMem [L.Expr (L.Variable (L.Var "k")) _, L.Expr (L.Variable (L.Var "m")) _] ->
+             return ()
+           other -> assertFailure $ "Esperado Prim PrimMem [key, map], obtido: " ++ show other
+
+  , testCase "MapAccess traduz para IfNone com PrimGet e falha com FAILWITH não-vazio" $
+    let typed = MapAccess TInt (Var (TMap TInt TInt) "m") (Var TInt "k")
+        result = translateExpression typed
+    in case L.exprDesc result of
+         L.IfNone
+           (L.Expr (L.Prim L.PrimGet [keyArg, mapArg]) (L.TOption L.TInt))
+           (L.Expr (L.Prim L.PrimFailwith failArgs) _)
+           (L.LambdaBinder (L.Var "__value", L.TInt) (L.Expr (L.Variable (L.Var "__value")) L.TInt)) -> do
+             -- ordem [key, map] no GET
+             case (keyArg, mapArg) of
+               (L.Expr (L.Variable (L.Var "k")) _, L.Expr (L.Variable (L.Var "m")) _) -> return ()
+               _ -> assertFailure "PrimGet deveria receber [key, map] nessa ordem"
+             -- FAILWITH precisa de exatamente um argumento (valor a empurrar antes da instrução)
+             case failArgs of
+               [L.Expr (L.Const (L.CString _)) L.TString] -> return ()
+               _ -> assertFailure $ "FAILWITH deveria receber exatamente um argumento CString, obtido: " ++ show failArgs
+         other -> assertFailure $ "Estrutura inesperada para MapAccess: " ++ show other
+         
+  , testCase "MapAccess preserva o tipo do valor no resultado final" $
+      let typed = MapAccess TBool (Var (TMap TInt TBool) "m") (Var TInt "k")
+          result = translateExpression typed
+      in L.exprType result @?= L.TBool
+  ]
 
 -- Helper function to parse and assert success
 parseSuccess :: String -> (ParsedContract -> Assertion) -> Assertion

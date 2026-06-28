@@ -40,6 +40,15 @@ translateExpression (A.MapVal ty m) =
             (L.Expr (L.Prim (L.PrimEmptyMap k v) []) lt)
             (M.toList m)
         _ -> error "[Impossible] MapVal with non-map type after type checker."
+
+translateExpression (A.MapMemCheck ty mapExpr keyExpr) =
+  L.Expr
+    (L.Prim L.PrimMem
+      [ translateExpression keyExpr
+      , translateExpression mapExpr
+      ])
+    (translateType ty)   
+
 -- TODO: Write here the translation of the remaining expressions.
 translateExpression (A.MapRem ty mapExpr keyExpr) =
   let mapExpr' = translateExpression mapExpr
@@ -49,6 +58,35 @@ translateExpression (A.MapRem ty mapExpr keyExpr) =
         _ -> error "Cannot perform MapRem in a non-map type"
       noneExpr = L.Expr (L.Prim (L.PrimNone valTy) []) (L.TOption valTy)
    in mkExpr (L.Prim L.PrimUpdate [keyExpr', noneExpr, mapExpr']) ty
+
+-- MapAccess 
+translateExpression (A.MapAccess ty mapExpr keyExpr) =
+  let
+    mapExpr' = translateExpression mapExpr
+    keyExpr' = translateExpression keyExpr
+
+    optionExpr =
+      L.Expr
+        (L.Prim L.PrimGet [keyExpr', mapExpr'])
+        (L.TOption (translateType ty))
+
+    binder =
+      L.LambdaBinder
+        ( (L.Var "__value"), translateType ty )
+        (L.Expr
+          (L.Variable (L.Var "__value"))
+          (translateType ty))
+
+    failExpr =
+      L.Expr
+        (L.Prim L.PrimFailwith
+          [L.Expr (L.Const (L.CString "MAP_ACCESS_KEY_NOT_FOUND")) L.TString])
+        (translateType ty)
+
+  in
+    L.Expr
+      (L.IfNone optionExpr failExpr binder)
+      (translateType ty)
 
 -- Translate an assignment to an LValue into an LLTZ expression.
 compileAssignLValue :: A.TypedLValue -> L.Expr -> L.Expr
@@ -123,14 +161,30 @@ translateStatement (A.WhileStmt cond block) =
   let cond'  = translateExpression cond
       block' = translateStatement block
    in L.Expr (L.While cond' block') L.TUnit
+
+translateStatement (A.VarDeclStmt name _ expr) =
+  L.Expr
+    (L.LetMutIn
+      (L.MutVar name)
+      (translateExpression expr)
+      (L.Expr L.Skip L.TUnit))
+    L.TUnit
+
+translateStatement (A.ValDeclStmt name _ expr) =
+  L.Expr
+    (L.LetIn
+      (L.Var name)
+      (translateExpression expr)
+      (L.Expr L.Skip L.TUnit))
+    L.TUnit
 -- In LLTZ (an expression-based IR) there is no explicit return construct:
 -- the value of the last expression in a block is the return value.
 translateStatement (A.ReturnStmt expr) = translateExpression expr
+-- Translate mutable variable declaration.
 -- Translate a nested block of statements.
 translateStatement (A.SequenceStmt stmts) = translateBlock stmts
 
 -- Auxiliary functions for translating expressions.
-
 mkExpr :: L.ExprDesc -> A.Type -> L.Expr
 mkExpr e t = L.Expr e $ translateType t
 
