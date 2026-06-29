@@ -19,7 +19,7 @@ import SmartTS.Interpreter
   )
 import SmartTS.TypeCheck (typeCheckContract)
 import qualified SmartTS.IR.LLTZ as L
-import SmartTS.CodeGen.CompileLLTZ (translateExpression)
+import SmartTS.CodeGen.CompileLLTZ (translateExpression, translateStatement, compileAssignLValue, translateType)
 
 main :: IO ()
 main = defaultMain tests
@@ -41,6 +41,7 @@ tests =
     , typeCheckTests
     , codecTests
     , e2eTests
+    , e2eMapCounterTests
     ]
 
 codegenTests :: TestTree
@@ -75,6 +76,79 @@ codegenTests = testGroup "CodeGen: CompileLLTZ"
       let typed = MapAccess TBool (Var (TMap TInt TBool) "m") (Var TInt "k")
           result = translateExpression typed
       in L.exprType result @?= L.TBool
+
+  , testCase "MapEmpty traduz para PrimEmptyMap com tipos corretos" $
+      let typed = MapEmpty (TMap TInt TBool)
+          result = translateExpression typed
+      in case L.exprDesc result of
+           L.Prim (L.PrimEmptyMap L.TInt L.TBool) [] -> return ()
+           other -> assertFailure $ "Esperado PrimEmptyMap TInt TBool, obtido: " ++ show other
+
+  , testCase "MapEmpty preserva tipo TMap k v" $
+      let typed = MapEmpty (TMap TBool TInt)
+          result = translateExpression typed
+      in L.exprType result @?= L.TMap L.TBool L.TInt
+
+  , testCase "MapRem traduz para PrimUpdate [key, PrimNone v, map]" $
+      let typed = MapRem (TMap TInt TBool) (Var (TMap TInt TBool) "m") (Var TInt "k")
+          result = translateExpression typed
+      in case L.exprDesc result of
+           L.Prim L.PrimUpdate
+             [ L.Expr (L.Variable (L.Var "k")) _
+             , L.Expr (L.Prim (L.PrimNone L.TBool) []) _
+             , L.Expr (L.Variable (L.Var "m")) _
+             ] -> return ()
+           other -> assertFailure $ "Esperado PrimUpdate [key, PrimNone v, map] para MapRem, obtido: "
+                      ++ show other
+
+  , testCase "MapRem preserva tipo TMap k v" $
+      let typed = MapRem (TMap TInt TBool) (Var (TMap TInt TBool) "m") (Var TInt "k")
+          result = translateExpression typed
+      in L.exprType result @?= L.TMap L.TInt L.TBool
+
+  , testCase "MapVal com uma entrada traduz para PrimUpdate sobre PrimEmptyMap" $
+      let typed = MapVal (TMap TInt TBool) (M.fromList [(CInt TInt 1, CBool TBool True)])
+          result = translateExpression typed
+      in case L.exprDesc result of
+           L.Prim L.PrimUpdate [_, _, L.Expr (L.Prim (L.PrimEmptyMap L.TInt L.TBool) []) _] ->
+             return ()
+           other -> assertFailure $ "Esperado PrimUpdate sobre PrimEmptyMap para MapVal, obtido: "
+                      ++ show other
+
+  , testCase "MapVal preserva tipo TMap k v" $
+      let typed = MapVal (TMap TInt TBool) (M.fromList [(CInt TInt 1, CBool TBool True)])
+          result = translateExpression typed
+      in L.exprType result @?= L.TMap L.TInt L.TBool
+
+  , testCase "translateType converte TMap TInt TBool correctamente" $
+      translateType (TMap TInt TBool) @?= L.TMap L.TInt L.TBool
+
+  , testCase "translateType converte TMap aninhado (valor é mapa) correctamente" $
+      translateType (TMap TBool (TMap TInt TBool)) @?= L.TMap L.TBool (L.TMap L.TInt L.TBool)
+
+  , testCase "VarDeclStmt traduz para LetMutIn com tipo TUnit" $
+      let result = translateStatement (VarDeclStmt "x" TInt (CInt TInt 42))
+      in case L.exprDesc result of
+           L.LetMutIn (L.MutVar "x") _ _ -> L.exprType result @?= L.TUnit
+           other -> assertFailure $ "Esperado LetMutIn para VarDeclStmt, obtido: " ++ show other
+
+  , testCase "ValDeclStmt traduz para LetIn com tipo TUnit" $
+      let result = translateStatement (ValDeclStmt "y" TBool (CBool TBool True))
+      in case L.exprDesc result of
+           L.LetIn (L.Var "y") _ _ -> L.exprType result @?= L.TUnit
+           other -> assertFailure $ "Esperado LetIn para ValDeclStmt, obtido: " ++ show other
+
+  , testCase "compileAssignLValue LMapAccess gera Assign com PrimUpdate [key, Some val, map]" $
+      let key    = CInt TInt 1
+          val    = L.Expr (L.Const (L.CBool True)) L.TBool
+          result = compileAssignLValue (LMapAccess (LVar "m") key) val
+      in case L.exprDesc result of
+           L.Assign (L.MutVar "m") inner ->
+             case L.exprDesc inner of
+               L.Prim L.PrimUpdate [_, L.Expr (L.Prim L.PrimSome [_]) _, _] -> return ()
+               other2 -> assertFailure $ "Corpo do Assign devia ser PrimUpdate [key, Some val, map], obtido: "
+                            ++ show other2
+           other -> assertFailure $ "Esperado Assign (MutVar \"m\") ..., obtido: " ++ show other
   ]
 
 -- Helper function to parse and assert success
@@ -850,6 +924,50 @@ membershipTypedContract =
       Left err -> error ("Membership.smartts failed to type-check: " ++ err)
       Right tc -> tc
 
+mapCounterSource :: String
+mapCounterSource =
+  "contract MapCounter {\n\
+  \  storage: {\n\
+  \    counts: map<int, int>\n\
+  \  };\n\
+  \\n\
+  \  @originate\n\
+  \  init(): unit {\n\
+  \    storage.counts = empty_map;\n\
+  \    return ();\n\
+  \  }\n\
+  \\n\
+  \  @entrypoint\n\
+  \  setEntry(key: int): unit {\n\
+  \    storage.counts[key] = 1;\n\
+  \    return ();\n\
+  \  }\n\
+  \\n\
+  \  @entrypoint\n\
+  \  getEntry(key: int): int {\n\
+  \    return storage.counts[key];\n\
+  \  }\n\
+  \\n\
+  \  @entrypoint\n\
+  \  hasEntry(key: int): bool {\n\
+  \    return mem(storage.counts, key);\n\
+  \  }\n\
+  \\n\
+  \  @entrypoint\n\
+  \  remEntry(key: int): unit {\n\
+  \    storage.counts = remove(storage.counts, key);\n\
+  \    return ();\n\
+  \  }\n\
+  \}"
+
+mapCounterTypedContract :: TypedContract
+mapCounterTypedContract =
+  case parseContractFromString mapCounterSource of
+    Left err -> error ("MapCounter failed to parse: " ++ show err)
+    Right c -> case typeCheckContract c of
+      Left err -> error ("MapCounter failed to type-check: " ++ err)
+      Right tc -> tc
+
 e2eTests :: TestTree
 e2eTests =
   testGroup
@@ -922,4 +1040,80 @@ e2eTests =
         case callEntrypointWithJsonArgs repo2 membershipTypedContract addr "removeMember" membershipSource (object ["user" .= (7 :: Int)]) of
           Left err -> assertFailure err
           Right (ret, _) -> assertEqual "removeMember finds the reloaded member" (Just (CBool TBool True)) ret
+    ]
+
+e2eMapCounterTests :: TestTree
+e2eMapCounterTests =
+  testGroup
+    "End-to-end: MapCounter.smartts - todas as operações de mapa"
+    [ testCase "originate inicializa storage com mapa counts vazio" $
+        case originateWithJsonArgs M.empty mapCounterTypedContract mapCounterSource (object []) of
+          Left err -> assertFailure err
+          Right (_, repo) -> case M.toList repo of
+            [(_, ContractInstance "MapCounter" (Record _ [("counts", MapVal _ m)]))] ->
+              assertEqual "counts começa vazio" M.empty m
+            other -> assertFailure $ "Conteúdo inesperado do repositório: " ++ show other
+
+    , testCase "setEntry insere uma entrada no mapa" $ do
+        (addr, repo0) <-
+          case originateWithJsonArgs M.empty mapCounterTypedContract mapCounterSource (object []) of
+            Left err -> assertFailure err >> error "unreachable"
+            Right ok -> return ok
+        case callEntrypointWithJsonArgs repo0 mapCounterTypedContract addr "setEntry" mapCounterSource (object ["key" .= (7 :: Int)]) of
+          Left err -> assertFailure err
+          Right (_, repo1) -> case M.lookup addr repo1 of
+            Just (ContractInstance _ (Record _ [("counts", MapVal _ m)])) ->
+              assertEqual "counts tem a entrada inserida" (M.fromList [(CInt TInt 7, CInt TInt 1)]) m
+            other -> assertFailure $ "Instância inesperada: " ++ show other
+
+    , testCase "getEntry devolve o valor de uma chave existente" $ do
+        (addr, repo0) <-
+          case originateWithJsonArgs M.empty mapCounterTypedContract mapCounterSource (object []) of
+            Left err -> assertFailure err >> error "unreachable"
+            Right ok -> return ok
+        repo1 <-
+          case callEntrypointWithJsonArgs repo0 mapCounterTypedContract addr "setEntry" mapCounterSource (object ["key" .= (7 :: Int)]) of
+            Left err -> assertFailure err >> error "unreachable"
+            Right (_, r) -> return r
+        case callEntrypointWithJsonArgs repo1 mapCounterTypedContract addr "getEntry" mapCounterSource (object ["key" .= (7 :: Int)]) of
+          Left err -> assertFailure err
+          Right (ret, _) -> assertEqual "getEntry devolve 1" (Just (CInt TInt 1)) ret
+
+    , testCase "hasEntry devolve true para chave existente" $ do
+        (addr, repo0) <-
+          case originateWithJsonArgs M.empty mapCounterTypedContract mapCounterSource (object []) of
+            Left err -> assertFailure err >> error "unreachable"
+            Right ok -> return ok
+        repo1 <-
+          case callEntrypointWithJsonArgs repo0 mapCounterTypedContract addr "setEntry" mapCounterSource (object ["key" .= (5 :: Int)]) of
+            Left err -> assertFailure err >> error "unreachable"
+            Right (_, r) -> return r
+        case callEntrypointWithJsonArgs repo1 mapCounterTypedContract addr "hasEntry" mapCounterSource (object ["key" .= (5 :: Int)]) of
+          Left err -> assertFailure err
+          Right (ret, _) -> assertEqual "hasEntry devolve true para chave presente" (Just (CBool TBool True)) ret
+
+    , testCase "hasEntry devolve false para chave ausente" $ do
+        (addr, repo0) <-
+          case originateWithJsonArgs M.empty mapCounterTypedContract mapCounterSource (object []) of
+            Left err -> assertFailure err >> error "unreachable"
+            Right ok -> return ok
+        case callEntrypointWithJsonArgs repo0 mapCounterTypedContract addr "hasEntry" mapCounterSource (object ["key" .= (99 :: Int)]) of
+          Left err -> assertFailure err
+          Right (ret, _) -> assertEqual "hasEntry devolve false para chave ausente" (Just (CBool TBool False)) ret
+
+    , testCase "remEntry remove uma chave do mapa" $ do
+        (addr, repo0) <-
+          case originateWithJsonArgs M.empty mapCounterTypedContract mapCounterSource (object []) of
+            Left err -> assertFailure err >> error "unreachable"
+            Right ok -> return ok
+        repo1 <-
+          case callEntrypointWithJsonArgs repo0 mapCounterTypedContract addr "setEntry" mapCounterSource (object ["key" .= (3 :: Int)]) of
+            Left err -> assertFailure err >> error "unreachable"
+            Right (_, r) -> return r
+        case callEntrypointWithJsonArgs repo1 mapCounterTypedContract addr "remEntry" mapCounterSource (object ["key" .= (3 :: Int)]) of
+          Left err -> assertFailure err
+          Right (_, repo2) -> case M.lookup addr repo2 of
+            Just (ContractInstance _ (Record _ [("counts", MapVal _ m)])) ->
+              assertEqual "counts fica vazio após remEntry" M.empty m
+            other -> assertFailure $ "Instância inesperada após remEntry: " ++ show other
     ]
